@@ -8,7 +8,7 @@ from scipy.stats import poisson
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Import your map
+# ✅ Import your map
 from mappings import NAME_MAP
 
 app = FastAPI()
@@ -193,7 +193,8 @@ def get_live_edges():
                     has_model = False
                     model_probs, fair_odds = {}, {}
                     
-                    # 2. If Model works, save data. If None, skip data but KEEP GAME.
+                    # 2. If Model works, save data. 
+                    # 🚨 IMPORTANT FIX: If probs is None, we still KEEP the game!
                     if probs:
                         has_model = True
                         model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
@@ -216,7 +217,7 @@ def get_live_edges():
                                     if o['name'] == 'Over': market_odds["O2.5"] = o['price']
                                     if o['name'] == 'Under': market_odds["U2.5"] = o['price']
 
-                    # 4. ALWAYS APPEND THE GAME
+                    # 4. ALWAYS APPEND THE GAME (No more filtering!)
                     odds_data.append({
                         "id": game['id'],
                         "date": game['commence_time'],
