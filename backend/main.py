@@ -25,7 +25,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- TRAINING (Keep your existing logic, just wrapped here) ---
+# --- TRAINING LOGIC ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
     if not os.path.exists(folder_path): return None
@@ -78,7 +78,7 @@ for league in LEAGUE_CONFIG:
     res = train_league_model(league)
     if res: league_stats[league] = res
 
-# --- NEW: ADVANCED MATH ENGINE ---
+# --- MATH ENGINE ---
 def calculate_all_probabilities(league, home, away):
     if league not in league_stats: return None
     db = league_stats[league]
@@ -88,7 +88,7 @@ def calculate_all_probabilities(league, home, away):
     name_map = {
         "Eintracht Frankfurt": "Eint Frankfurt", "Köln": "1. FC Köln", 
         "Bayer Leverkusen": "Leverkusen", "Borussia Mönchengladbach": "M'gladbach",
-        "Hamburger SV": "Hamburger SV" # Add others as needed
+        "Hamburger SV": "Hamburger SV"
     }
     home = name_map.get(home, home)
     away = name_map.get(away, away)
@@ -137,30 +137,27 @@ def get_live_edges():
     if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]:
         return api_cache["data"]
 
-    print("🔄 Fetching New Odds (H2H + Totals)...")
+    print("🔄 Fetching New Odds...")
     all_results = []
     
     for league, key in LEAGUE_CONFIG.items():
         try:
-            # We now request 'h2h' AND 'totals' markets
             url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal"
             res = requests.get(url).json()
             
             for game in res:
                 home, away = game['home_team'], game['away_team']
+                commence_time = game['commence_time'] # NEW: Get Date
+
                 probs = calculate_all_probabilities(league, home, away)
                 if not probs: continue
                 
-                # Default Odds Objects (In case bookie doesn't have them)
-                market_odds = {
-                    "1": 0, "X": 0, "2": 0,
-                    "O2.5": 0, "U2.5": 0
-                }
+                market_odds = { "1": 0, "X": 0, "2": 0, "O2.5": 0, "U2.5": 0 }
 
                 # Parse Bookie Odds
                 bookie = next((b for b in game['bookmakers'] if 'unibet' in b['key'] or 'betfair' in b['key']), game['bookmakers'][0] if game['bookmakers'] else None)
                 if bookie:
-                    # 1. Parse H2H
+                    # H2H
                     h2h = next((m for m in bookie['markets'] if m['key'] == 'h2h'), None)
                     if h2h:
                         for o in h2h['outcomes']:
@@ -168,18 +165,17 @@ def get_live_edges():
                             elif o['name'] == away: market_odds["2"] = o['price']
                             elif o['name'] == 'Draw': market_odds["X"] = o['price']
                     
-                    # 2. Parse Totals (Over/Under 2.5 is standard)
+                    # Totals
                     totals = next((m for m in bookie['markets'] if m['key'] == 'totals'), None)
                     if totals:
                         for o in totals['outcomes']:
-                            # usually returns point=2.5
                             if o.get('point') == 2.5:
                                 if o['name'] == 'Over': market_odds["O2.5"] = o['price']
                                 if o['name'] == 'Under': market_odds["U2.5"] = o['price']
 
-                # Build the Match Data Package
                 all_results.append({
                     "id": game['id'],
+                    "date": commence_time, # NEW: Sending date to frontend
                     "match": f"{home} vs {away}",
                     "league": league,
                     "bookie": bookie['title'] if bookie else "Unknown",
@@ -190,6 +186,9 @@ def get_live_edges():
 
         except Exception as e:
             print(f"Error {league}: {e}")
+
+    # NEW: Sort by Date (Earliest first)
+    all_results.sort(key=lambda x: x['date'])
 
     api_cache["data"] = all_results
     api_cache["last_updated"] = current_time
