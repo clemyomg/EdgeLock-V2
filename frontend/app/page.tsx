@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from "react";
 
 // Use your PC's IP here
-const BACKEND_URL = "edgelock-v2-production.up.railway.app"; 
+const BACKEND_URL = "https://edgelock-v2-production.up.railway.app"; 
 
 export default function EdgeLockPro() {
   const [matches, setMatches] = useState<any[]>([]);
