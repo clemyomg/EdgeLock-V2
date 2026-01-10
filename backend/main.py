@@ -101,8 +101,7 @@ def calculate_all_probabilities(league, home, away):
     home_mapped = NAME_MAP.get(home, home)
     away_mapped = NAME_MAP.get(away, away)
 
-    if home_mapped not in stats or away_mapped not in stats: 
-        return None
+    if home_mapped not in stats or away_mapped not in stats: return None
 
     h, a = stats[home_mapped], stats[away_mapped]
     xg_h = h['att_h'] * a['def_a'] * db['avg_h']
@@ -155,7 +154,7 @@ def get_football_api_data():
                 "elapsed": f["fixture"]["status"]["elapsed"],
                 "goals_h": f["goals"]["home"],
                 "goals_a": f["goals"]["away"],
-                "round": f["league"]["round"] # ✅ NEW: Catch the Game Day
+                "round": f["league"]["round"]
             })
             
         api_cache["scores"]["data"] = simplified
@@ -175,7 +174,8 @@ def get_live_edges():
     print("🔄 Fetching New Odds...")
     for league, key in LEAGUE_CONFIG.items():
         try:
-            url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal"
+            # ✅ UPDATED: Fetch h2h, doublechance, and spreads (handicaps)
+            url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,doublechance,spreads&oddsFormat=decimal"
             res = requests.get(url).json()
             
             if not isinstance(res, list): continue
@@ -192,21 +192,37 @@ def get_live_edges():
                     model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
                     fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
 
-                market_odds = { "1": 0, "X": 0, "2": 0, "O2.5": 0, "U2.5": 0 }
+                # ✅ PARSE NEW MARKETS
+                market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
                 bookie = next((b for b in game['bookmakers'] if 'unibet' in b['key'] or 'betfair' in b['key']), game['bookmakers'][0] if game['bookmakers'] else None)
+                
                 if bookie:
+                    # 1X2
                     h2h = next((m for m in bookie['markets'] if m['key'] == 'h2h'), None)
                     if h2h:
                         for o in h2h['outcomes']:
                             if o['name'] == home: market_odds["1"] = o['price']
                             elif o['name'] == away: market_odds["2"] = o['price']
                             elif o['name'] == 'Draw': market_odds["X"] = o['price']
-                    totals = next((m for m in bookie['markets'] if m['key'] == 'totals'), None)
-                    if totals:
-                        for o in totals['outcomes']:
-                            if o.get('point') == 2.5:
-                                if o['name'] == 'Over': market_odds["O2.5"] = o['price']
-                                if o['name'] == 'Under': market_odds["U2.5"] = o['price']
+                    
+                    # Double Chance (The Odds API usually returns "Home/Draw", "Draw/Away")
+                    dc = next((m for m in bookie['markets'] if m['key'] == 'doublechance'), None)
+                    if dc:
+                        for o in dc['outcomes']:
+                            # Matches "Bayern Munich/Draw" or "Home/Draw"
+                            if (home in o['name'] or 'Home' in o['name']) and 'Draw' in o['name']: market_odds["1X"] = o['price']
+                            if (away in o['name'] or 'Away' in o['name']) and 'Draw' in o['name']: market_odds["X2"] = o['price']
+
+                    # Spreads (Handicaps)
+                    spreads = next((m for m in bookie['markets'] if m['key'] == 'spreads'), None)
+                    if spreads:
+                        for o in spreads['outcomes']:
+                            if o['name'] == home: 
+                                market_odds["H_Spread"] = o['price']
+                                market_odds["H_Spread_Point"] = o['point']
+                            elif o['name'] == away: 
+                                market_odds["A_Spread"] = o['price']
+                                market_odds["A_Spread_Point"] = o['point']
 
                 odds_data.append({
                     "id": game['id'],
@@ -226,13 +242,12 @@ def get_live_edges():
 
         except Exception as e: print(f"❌ Odds API Error: {e}")
 
-    # MERGE WITH SCORES
     live_scores = get_football_api_data()
     final_results = []
     
     for game in odds_data:
         game["score"] = None
-        game["round"] = None # Default
+        game["round"] = None
         
         h_home = game["home_team"].split()[0].lower()
         
@@ -245,7 +260,6 @@ def get_live_edges():
                     "goals_h": score["goals_h"],
                     "goals_a": score["goals_a"]
                 }
-                # ✅ ADD ROUND INFO
                 game["round"] = score["round"]
                 break
         
