@@ -174,11 +174,16 @@ def get_live_edges():
     print("🔄 Fetching New Odds...")
     for league, key in LEAGUE_CONFIG.items():
         try:
-            # ✅ UPDATED: Fetch h2h, doublechance, and spreads (handicaps)
+            # 1. Attempt to fetch FULL markets (might fail on free plan sometimes)
             url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,doublechance,spreads&oddsFormat=decimal"
             res = requests.get(url).json()
             
-            if not isinstance(res, list): continue
+            # 2. Fallback: If quota exceeded or error, try SIMPLE fetch
+            if not isinstance(res, list):
+                print(f"⚠️ Complex Fetch Failed: {res}. Retrying with Basic...")
+                url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal"
+                res = requests.get(url).json()
+                if not isinstance(res, list): continue # Give up if even basic fails
 
             for game in res:
                 home, away = game['home_team'], game['away_team']
@@ -192,7 +197,7 @@ def get_live_edges():
                     model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
                     fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
 
-                # ✅ PARSE NEW MARKETS
+                # Initialize all odds to 0
                 market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
                 bookie = next((b for b in game['bookmakers'] if 'unibet' in b['key'] or 'betfair' in b['key']), game['bookmakers'][0] if game['bookmakers'] else None)
                 
@@ -205,15 +210,14 @@ def get_live_edges():
                             elif o['name'] == away: market_odds["2"] = o['price']
                             elif o['name'] == 'Draw': market_odds["X"] = o['price']
                     
-                    # Double Chance (The Odds API usually returns "Home/Draw", "Draw/Away")
+                    # Double Chance (Not always available)
                     dc = next((m for m in bookie['markets'] if m['key'] == 'doublechance'), None)
                     if dc:
                         for o in dc['outcomes']:
-                            # Matches "Bayern Munich/Draw" or "Home/Draw"
                             if (home in o['name'] or 'Home' in o['name']) and 'Draw' in o['name']: market_odds["1X"] = o['price']
                             if (away in o['name'] or 'Away' in o['name']) and 'Draw' in o['name']: market_odds["X2"] = o['price']
 
-                    # Spreads (Handicaps)
+                    # Spreads
                     spreads = next((m for m in bookie['markets'] if m['key'] == 'spreads'), None)
                     if spreads:
                         for o in spreads['outcomes']:
@@ -248,7 +252,6 @@ def get_live_edges():
     for game in odds_data:
         game["score"] = None
         game["round"] = None
-        
         h_home = game["home_team"].split()[0].lower()
         
         for score in live_scores:
