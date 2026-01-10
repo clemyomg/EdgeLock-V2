@@ -8,7 +8,7 @@ from scipy.stats import poisson
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# ✅ IMPORT YOUR NEW MAPPING FILE
+# Import your map
 from mappings import NAME_MAP
 
 app = FastAPI()
@@ -41,33 +41,26 @@ app.add_middleware(
 
 # --- HELPER: NAME NORMALIZER ---
 def normalize_name(name):
-    return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").strip()
+    # This helps matching "Bayern Munich" to "FC Bayern"
+    return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
 # --- 1. TRAINING LOGIC ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
-    if not os.path.exists(folder_path): 
-        print(f"❌ Error: Data folder not found at {folder_path}")
-        return None
+    if not os.path.exists(folder_path): return None
 
     dfs = []
-    print(f"📂 Loading data for {league_name}...")
     for file in os.listdir(folder_path):
         if file.endswith(".csv"):
             try:
                 dfs.append(pd.read_csv(os.path.join(folder_path, file)))
-            except Exception as e: 
-                print(f"  ⚠️ Failed to read {file}: {e}")
+            except: pass
     
-    if not dfs: 
-        print("❌ No CSV files loaded!")
-        return None
+    if not dfs: return None
     
     full_df = pd.concat(dfs)
     df = full_df[full_df['Result'].notna()].copy()
     
-    print(f"✅ Loaded {len(df)} historical matches for {league_name}")
-
     # Time Decay
     df['DateObj'] = pd.to_datetime(df['Date'], errors='coerce')
     latest = df['DateObj'].max()
@@ -106,17 +99,16 @@ def calculate_all_probabilities(league, home, away):
     db = league_stats[league]
     stats = db["stats"]
     
-    # ✅ USE THE IMPORTED MAP
-    home = NAME_MAP.get(home, home)
-    away = NAME_MAP.get(away, away)
+    # Use Mapping
+    home_mapped = NAME_MAP.get(home, home)
+    away_mapped = NAME_MAP.get(away, away)
 
-    # DEBUGGING: Print missing teams to Railway logs
-    if home not in stats: print(f"⚠️ MISSING DATA: '{home}' (Not found in CSVs)")
-    if away not in stats: print(f"⚠️ MISSING DATA: '{away}' (Not found in CSVs)")
+    # 🚨 FIX: If mapping fails, return NONE (don't crash), but don't stop the loop in the main function
+    if home_mapped not in stats or away_mapped not in stats: 
+        print(f"⚠️ No Model Data for: {home_mapped} vs {away_mapped}")
+        return None
 
-    if home not in stats or away not in stats: return None
-
-    h, a = stats[home], stats[away]
+    h, a = stats[home_mapped], stats[away_mapped]
     xg_h = h['att_h'] * a['def_a'] * db['avg_h']
     xg_a = a['att_a'] * h['def_h'] * db['avg_a']
 
@@ -191,17 +183,23 @@ def get_live_edges():
             try:
                 url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal"
                 res = requests.get(url).json()
+                
                 for game in res:
                     home, away = game['home_team'], game['away_team']
+                    
+                    # 1. Try to get Model
                     probs = calculate_all_probabilities(league, home, away)
                     
                     has_model = False
                     model_probs, fair_odds = {}, {}
+                    
+                    # 2. If Model works, save data. If None, skip data but KEEP GAME.
                     if probs:
                         has_model = True
                         model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
                         fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
 
+                    # 3. Get Market Odds
                     market_odds = { "1": 0, "X": 0, "2": 0, "O2.5": 0, "U2.5": 0 }
                     bookie = next((b for b in game['bookmakers'] if 'unibet' in b['key'] or 'betfair' in b['key']), game['bookmakers'][0] if game['bookmakers'] else None)
                     if bookie:
@@ -218,6 +216,7 @@ def get_live_edges():
                                     if o['name'] == 'Over': market_odds["O2.5"] = o['price']
                                     if o['name'] == 'Under': market_odds["U2.5"] = o['price']
 
+                    # 4. ALWAYS APPEND THE GAME
                     odds_data.append({
                         "id": game['id'],
                         "date": game['commence_time'],
@@ -225,7 +224,7 @@ def get_live_edges():
                         "home_team": home, 
                         "away_team": away,
                         "league": league,
-                        "has_model": has_model,
+                        "has_model": has_model, # True/False
                         "probs": model_probs,
                         "fair_odds": fair_odds,
                         "market_odds": market_odds
