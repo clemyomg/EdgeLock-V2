@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, date  # <--- THIS WAS MISSING!
+from datetime import datetime, date
 from scipy.stats import poisson
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -98,13 +98,10 @@ def calculate_all_probabilities(league, home, away):
     db = league_stats[league]
     stats = db["stats"]
     
-    # Use Mapping
     home_mapped = NAME_MAP.get(home, home)
     away_mapped = NAME_MAP.get(away, away)
 
-    # 🚨 LOGGING: Check if mapping worked
     if home_mapped not in stats or away_mapped not in stats: 
-        print(f"⚠️ No Model Data for: {home} (mapped: {home_mapped}) vs {away} (mapped: {away_mapped})")
         return None
 
     h, a = stats[home_mapped], stats[away_mapped]
@@ -137,9 +134,7 @@ def get_football_api_data():
     if current_time - api_cache["scores"]["last_updated"] < SCORES_CACHE_DURATION:
         return api_cache["scores"]["data"]
     
-    # This line was crashing because 'date' was not imported!
     today_str = date.today().strftime("%Y-%m-%d")
-    
     url = f"https://v3.football.api-sports.io/fixtures?league={FOOTBALL_LEAGUE_ID}&season={CURRENT_SEASON}&date={today_str}"
     
     headers = {
@@ -159,7 +154,8 @@ def get_football_api_data():
                 "status_short": f["fixture"]["status"]["short"], 
                 "elapsed": f["fixture"]["status"]["elapsed"],
                 "goals_h": f["goals"]["home"],
-                "goals_a": f["goals"]["away"]
+                "goals_a": f["goals"]["away"],
+                "round": f["league"]["round"] # ✅ NEW: Catch the Game Day
             })
             
         api_cache["scores"]["data"] = simplified
@@ -182,26 +178,20 @@ def get_live_edges():
             url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal"
             res = requests.get(url).json()
             
-            if not isinstance(res, list):
-                print(f"❌ API Error: {res}")
-                continue
+            if not isinstance(res, list): continue
 
             for game in res:
                 home, away = game['home_team'], game['away_team']
-                
-                # 1. Try to get Model
                 probs = calculate_all_probabilities(league, home, away)
                 
                 has_model = False
                 model_probs, fair_odds = {}, {}
                 
-                # 2. If Model works, save data
                 if probs:
                     has_model = True
                     model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
                     fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
 
-                # 3. Get Market Odds
                 market_odds = { "1": 0, "X": 0, "2": 0, "O2.5": 0, "U2.5": 0 }
                 bookie = next((b for b in game['bookmakers'] if 'unibet' in b['key'] or 'betfair' in b['key']), game['bookmakers'][0] if game['bookmakers'] else None)
                 if bookie:
@@ -218,7 +208,6 @@ def get_live_edges():
                                 if o['name'] == 'Over': market_odds["O2.5"] = o['price']
                                 if o['name'] == 'Under': market_odds["U2.5"] = o['price']
 
-                # 4. ALWAYS APPEND THE GAME
                 odds_data.append({
                     "id": game['id'],
                     "date": game['commence_time'],
@@ -235,16 +224,16 @@ def get_live_edges():
             api_cache["odds"]["data"] = odds_data
             api_cache["odds"]["last_updated"] = current_time
 
-        except Exception as e: 
-            print(f"❌ Odds API Error: {e}")
+        except Exception as e: print(f"❌ Odds API Error: {e}")
 
-    # 5. MERGE WITH LIVE SCORES
+    # MERGE WITH SCORES
     live_scores = get_football_api_data()
-    
     final_results = []
+    
     for game in odds_data:
         game["score"] = None
-        # Simple fuzzy match for scores
+        game["round"] = None # Default
+        
         h_home = game["home_team"].split()[0].lower()
         
         for score in live_scores:
@@ -256,6 +245,8 @@ def get_live_edges():
                     "goals_h": score["goals_h"],
                     "goals_a": score["goals_a"]
                 }
+                # ✅ ADD ROUND INFO
+                game["round"] = score["round"]
                 break
         
         final_results.append(game)
