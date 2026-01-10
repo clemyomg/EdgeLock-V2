@@ -3,11 +3,12 @@ import time
 import requests
 import pandas as pd
 import numpy as np
+from datetime import datetime, date  # <--- THIS WAS MISSING!
 from scipy.stats import poisson
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# ✅ Import the corrected map
+# ✅ Import your map
 from mappings import NAME_MAP
 
 app = FastAPI()
@@ -37,6 +38,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- HELPER: NAME NORMALIZER ---
+def normalize_name(name):
+    return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
 # --- 1. TRAINING LOGIC ---
 def train_league_model(league_name):
@@ -132,7 +137,9 @@ def get_football_api_data():
     if current_time - api_cache["scores"]["last_updated"] < SCORES_CACHE_DURATION:
         return api_cache["scores"]["data"]
     
+    # This line was crashing because 'date' was not imported!
     today_str = date.today().strftime("%Y-%m-%d")
+    
     url = f"https://v3.football.api-sports.io/fixtures?league={FOOTBALL_LEAGUE_ID}&season={CURRENT_SEASON}&date={today_str}"
     
     headers = {
@@ -169,10 +176,6 @@ def get_live_edges():
     current_time = time.time()
     
     odds_data = []
-    # FORCE REFRESH: Ignore cache for now to test the fix
-    # if current_time - api_cache["odds"]["last_updated"] < ODDS_CACHE_DURATION and api_cache["odds"]["data"]:
-    #     odds_data = api_cache["odds"]["data"]
-    # else:
     print("🔄 Fetching New Odds...")
     for league, key in LEAGUE_CONFIG.items():
         try:
@@ -198,7 +201,7 @@ def get_live_edges():
                     model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
                     fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
 
-                # 3. Get Market Odds (Always needed)
+                # 3. Get Market Odds
                 market_odds = { "1": 0, "X": 0, "2": 0, "O2.5": 0, "U2.5": 0 }
                 bookie = next((b for b in game['bookmakers'] if 'unibet' in b['key'] or 'betfair' in b['key']), game['bookmakers'][0] if game['bookmakers'] else None)
                 if bookie:
@@ -215,7 +218,7 @@ def get_live_edges():
                                 if o['name'] == 'Over': market_odds["O2.5"] = o['price']
                                 if o['name'] == 'Under': market_odds["U2.5"] = o['price']
 
-                # 4. ALWAYS APPEND THE GAME (The Critical Fix)
+                # 4. ALWAYS APPEND THE GAME
                 odds_data.append({
                     "id": game['id'],
                     "date": game['commence_time'],
@@ -229,7 +232,6 @@ def get_live_edges():
                     "market_odds": market_odds
                 })
             
-            # Update cache
             api_cache["odds"]["data"] = odds_data
             api_cache["odds"]["last_updated"] = current_time
 
