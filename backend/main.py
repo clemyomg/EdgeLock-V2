@@ -8,6 +8,9 @@ from scipy.stats import poisson
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# ✅ IMPORT YOUR NEW MAPPING FILE
+from mappings import NAME_MAP
+
 app = FastAPI()
 
 # --- CONFIG ---
@@ -15,11 +18,11 @@ ODDS_API_KEY = "9a605006b43a0074c7c7484f2978ed5b"
 FOOTBALL_API_KEY = "7bea55228c0e0fbd7de71e7f5ff3802f"
 
 # Limits & Caching
-ODDS_CACHE_DURATION = 1800  # 30 mins (Odds don't change fast)
-SCORES_CACHE_DURATION = 60  # 60 seconds (Scores change fast)
+ODDS_CACHE_DURATION = 1800  # 30 mins
+SCORES_CACHE_DURATION = 60  # 60 seconds
 
 LEAGUE_CONFIG = { "Bundesliga": "soccer_germany_bundesliga" }
-FOOTBALL_LEAGUE_ID = 78 # Bundesliga ID on API-Football
+FOOTBALL_LEAGUE_ID = 78 
 CURRENT_SEASON = 2024
 
 # --- MEMORY ---
@@ -37,27 +40,34 @@ app.add_middleware(
 )
 
 # --- HELPER: NAME NORMALIZER ---
-# Helps match "Bayern Munich" (Odds API) with "FC Bayern München" (Football API)
 def normalize_name(name):
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").strip()
 
-# --- 1. TRAINING LOGIC (Unchanged) ---
+# --- 1. TRAINING LOGIC ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
-    if not os.path.exists(folder_path): return None
+    if not os.path.exists(folder_path): 
+        print(f"❌ Error: Data folder not found at {folder_path}")
+        return None
 
     dfs = []
+    print(f"📂 Loading data for {league_name}...")
     for file in os.listdir(folder_path):
         if file.endswith(".csv"):
             try:
                 dfs.append(pd.read_csv(os.path.join(folder_path, file)))
-            except: pass
+            except Exception as e: 
+                print(f"  ⚠️ Failed to read {file}: {e}")
     
-    if not dfs: return None
+    if not dfs: 
+        print("❌ No CSV files loaded!")
+        return None
     
     full_df = pd.concat(dfs)
     df = full_df[full_df['Result'].notna()].copy()
     
+    print(f"✅ Loaded {len(df)} historical matches for {league_name}")
+
     # Time Decay
     df['DateObj'] = pd.to_datetime(df['Date'], errors='coerce')
     latest = df['DateObj'].max()
@@ -90,20 +100,19 @@ for league in LEAGUE_CONFIG:
     res = train_league_model(league)
     if res: league_stats[league] = res
 
-# --- 2. MATH ENGINE (Unchanged) ---
+# --- 2. MATH ENGINE ---
 def calculate_all_probabilities(league, home, away):
     if league not in league_stats: return None
     db = league_stats[league]
     stats = db["stats"]
     
-    name_map = {
-        "Eintracht Frankfurt": "Eint Frankfurt", "Köln": "1. FC Köln", 
-        "Bayer Leverkusen": "Leverkusen", "Borussia Mönchengladbach": "M'gladbach",
-        "Hamburger SV": "Hamburger SV", "Stuttgart": "VfB Stuttgart", 
-        "Bayern Munich": "Bayern Munich"
-    }
-    home = name_map.get(home, home)
-    away = name_map.get(away, away)
+    # ✅ USE THE IMPORTED MAP
+    home = NAME_MAP.get(home, home)
+    away = NAME_MAP.get(away, away)
+
+    # DEBUGGING: Print missing teams to Railway logs
+    if home not in stats: print(f"⚠️ MISSING DATA: '{home}' (Not found in CSVs)")
+    if away not in stats: print(f"⚠️ MISSING DATA: '{away}' (Not found in CSVs)")
 
     if home not in stats or away not in stats: return None
 
@@ -130,17 +139,13 @@ def calculate_all_probabilities(league, home, away):
         "O2.5": prob_o25, "U2.5": 1 - prob_o25
     }
 
-# --- 3. NEW: LIVE SCORES FETCHER ---
+# --- 3. LIVE SCORES FETCHER ---
 def get_football_api_data():
     current_time = time.time()
     
-    # 1. Check Cache (Don't waste requests)
     if current_time - api_cache["scores"]["last_updated"] < SCORES_CACHE_DURATION:
         return api_cache["scores"]["data"]
-
-    print("⚽ Fetching Live Scores from API-Football...")
     
-    # We fetch ALL fixtures for today in Bundesliga
     today_str = date.today().strftime("%Y-%m-%d")
     url = f"https://v3.football.api-sports.io/fixtures?league={FOOTBALL_LEAGUE_ID}&season={CURRENT_SEASON}&date={today_str}"
     
@@ -153,14 +158,13 @@ def get_football_api_data():
         res = requests.get(url, headers=headers).json()
         fixtures = res.get("response", [])
         
-        # Simplify data for frontend
         simplified = []
         for f in fixtures:
             simplified.append({
                 "home": f["teams"]["home"]["name"],
                 "away": f["teams"]["away"]["name"],
-                "status_short": f["fixture"]["status"]["short"], # "1H", "FT", "NS"
-                "elapsed": f["fixture"]["status"]["elapsed"], # 34 (minutes)
+                "status_short": f["fixture"]["status"]["short"], 
+                "elapsed": f["fixture"]["status"]["elapsed"],
                 "goals_h": f["goals"]["home"],
                 "goals_a": f["goals"]["away"]
             })
@@ -173,12 +177,11 @@ def get_football_api_data():
         print(f"Football API Error: {e}")
         return []
 
-# --- 4. MAIN ENDPOINT (THE MERGER) ---
+# --- 4. MAIN ENDPOINT ---
 @app.get("/live-edges")
 def get_live_edges():
     current_time = time.time()
     
-    # A. Get Odds (Cached 30 mins)
     odds_data = []
     if current_time - api_cache["odds"]["last_updated"] < ODDS_CACHE_DURATION and api_cache["odds"]["data"]:
         odds_data = api_cache["odds"]["data"]
@@ -189,7 +192,6 @@ def get_live_edges():
                 url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals&oddsFormat=decimal"
                 res = requests.get(url).json()
                 for game in res:
-                    # (Logic from before to parse odds...)
                     home, away = game['home_team'], game['away_team']
                     probs = calculate_all_probabilities(league, home, away)
                     
@@ -220,7 +222,7 @@ def get_live_edges():
                         "id": game['id'],
                         "date": game['commence_time'],
                         "match": f"{home} vs {away}",
-                        "home_team": home, # Store raw names for matching
+                        "home_team": home, 
                         "away_team": away,
                         "league": league,
                         "has_model": has_model,
@@ -232,28 +234,20 @@ def get_live_edges():
                 api_cache["odds"]["last_updated"] = current_time
             except Exception as e: print(f"Odds API Error: {e}")
 
-    # B. Get Live Scores (Cached 60 secs)
     live_scores = get_football_api_data()
     
-    # C. MERGE DATA
-    # We loop through Odds Data and try to find a matching Score
     final_results = []
     for game in odds_data:
-        # Default: No live data
         game["score"] = None
-        
-        # Try to find match in live_scores
-        # Logic: Does "Bayern Munich" (Odds) look like "FC Bayern" (Football API)?
         h_norm = normalize_name(game["home_team"])
         
         for score in live_scores:
             if h_norm in normalize_name(score["home"]):
-                # MATCH FOUND!
                 game["score"] = {
-                    "status": score["status_short"], # "1H", "2H", "FT"
-                    "time": score["elapsed"],        # 34
-                    "goals_h": score["goals_h"],     # 1
-                    "goals_a": score["goals_a"]      # 0
+                    "status": score["status_short"], 
+                    "time": score["elapsed"],
+                    "goals_h": score["goals_h"],
+                    "goals_a": score["goals_a"]
                 }
                 break
         
