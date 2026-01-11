@@ -174,29 +174,30 @@ def get_live_edges(db: Session = Depends(get_db)):
                 predicted_score = f"{probs['xg_h']:.2f} - {probs['xg_a']:.2f}"
 
                 # 💾 SAVE TO DATABASE ("The Ledger")
+                # 🛑 FIX: We verify if the record exists first
                 existing_pred = db.query(MatchPrediction).filter(MatchPrediction.fixture_id == fix_id).first()
                 
                 if not existing_pred:
-                    # Create new record
+                    # ✅ FIX: Convert all NumPy types to standard float()
                     new_pred = MatchPrediction(
                         fixture_id=fix_id,
                         home_team=home_name,
                         away_team=away_name,
                         league="Bundesliga",
                         match_date=f["fixture"]["date"],
-                        model_home_xg=probs['xg_h'],
-                        model_away_xg=probs['xg_a'],
-                        fair_odd_home=fair_odds.get("1", 0),
-                        fair_odd_draw=fair_odds.get("X", 0),
-                        fair_odd_away=fair_odds.get("2", 0)
+                        model_home_xg=float(probs['xg_h']),  # 👈 Added float()
+                        model_away_xg=float(probs['xg_a']),  # 👈 Added float()
+                        fair_odd_home=float(fair_odds.get("1", 0)), # 👈 Added float()
+                        fair_odd_draw=float(fair_odds.get("X", 0)), # 👈 Added float()
+                        fair_odd_away=float(fair_odds.get("2", 0))  # 👈 Added float()
                     )
                     db.add(new_pred)
                     db.commit()
                     print(f"✅ Booked: {home_name} vs {away_name}")
                 else:
-                    # Update existing (if model changed)
-                    existing_pred.model_home_xg = probs['xg_h']
-                    existing_pred.model_away_xg = probs['xg_a']
+                    # Update existing (converting here too just in case)
+                    existing_pred.model_home_xg = float(probs['xg_h'])
+                    existing_pred.model_away_xg = float(probs['xg_a'])
                     db.commit()
 
             market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
