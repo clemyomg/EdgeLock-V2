@@ -1,13 +1,29 @@
 # backend/mappings.py
 
-# LEFT: API-Football Name (Exact strings from your logs)
-# RIGHT: CSV Name (Stathead format)
+# LEFT: API-Football Name (from logs)
+# RIGHT: YOUR CSV Name (verified from file)
 NAME_MAP = {
-    # --- Top Teams ---
-    "Bayern Munich": "Bayern Munich",
-    "Bayern München": "Bayern Munich",     # 👈 Added from logs
-    "FC Bayern München": "Bayern Munich",
+    # --- The Problem Teams (Fixed) ---
+    "Borussia Mönchengladbach": "Gladbach",
+    "Borussia Monchengladbach": "Gladbach",
+    "M'gladbach": "Gladbach",
+    "Gladbach": "Gladbach",
     
+    "Bayern München": "Bayern Munich",
+    "FC Bayern München": "Bayern Munich",
+    "Bayern Munich": "Bayern Munich",
+
+    "1899 Hoffenheim": "Hoffenheim",
+    "TSG 1899 Hoffenheim": "Hoffenheim",
+    "TSG Hoffenheim": "Hoffenheim",
+    
+    "FSV Mainz 05": "Mainz 05",
+    "1. FSV Mainz 05": "Mainz 05",
+    "Mainz 05": "Mainz 05",
+
+    "Eintracht Frankfurt": "Eint Frankfurt",
+    
+    # --- The Rest (Verified) ---
     "Borussia Dortmund": "Dortmund",
     "Dortmund": "Dortmund",
     
@@ -16,28 +32,17 @@ NAME_MAP = {
     "Bayer 04 Leverkusen": "Leverkusen",
     "Bayer Leverkusen": "Leverkusen",
     
-    # --- The Tricky Ones (Umlauts & Prefixes) ---
-    "Borussia Mönchengladbach": "M'gladbach", # 👈 Added (with ö)
-    "Borussia Monchengladbach": "M'gladbach",
-    "M'gladbach": "M'gladbach",
-    
-    "Eintracht Frankfurt": "Eint Frankfurt",
     "VfL Wolfsburg": "Wolfsburg",
     
-    "1899 Hoffenheim": "Hoffenheim",       # 👈 Added from logs
-    "TSG 1899 Hoffenheim": "Hoffenheim",
-    "TSG Hoffenheim": "Hoffenheim",
-    
-    "FSV Mainz 05": "Mainz 05",            # 👈 Added from logs
-    "1. FSV Mainz 05": "Mainz 05",
-    "Mainz 05": "Mainz 05",
-    
     "SC Freiburg": "Freiburg",
+    
     "Werder Bremen": "Werder Bremen",
+    
     "FC Augsburg": "Augsburg",
     "Augsburg": "Augsburg",
     
     "VfB Stuttgart": "Stuttgart",
+    
     "VfL Bochum": "Bochum",
     
     "1. FC Heidenheim": "Heidenheim",
@@ -47,28 +52,17 @@ NAME_MAP = {
     "Union Berlin": "Union Berlin",
     "1. FC Union Berlin": "Union Berlin",
     
-    # --- Promoted / Relegated / Others ---
     "Holstein Kiel": "Holstein Kiel",
-    "Kieler SV Holstein": "Holstein Kiel",
     
     "FC St. Pauli": "St. Pauli",
     "St. Pauli": "St. Pauli",
     
     "Darmstadt 98": "Darmstadt 98",
-    "SV Darmstadt 98": "Darmstadt 98",
     
     "1. FC Koln": "FC Koln",
     "FC Koln": "FC Koln",
     "Köln": "FC Koln",
-    "1. FC Köln": "FC Koln",
     
     "Hertha BSC": "Hertha BSC",
-    "Hertha Berlin": "Hertha BSC",
-    
-    "Schalke 04": "Schalke 04",
-    "FC Schalke 04": "Schalke 04",
-    
-    "Fortuna Dusseldorf": "Dusseldorf",
-    "Greuther Furth": "Greuther Furth",
-    "SpVgg Greuther Fürth": "Greuther Furth"
+    "Hertha Berlin": "Hertha BSC"
 }
