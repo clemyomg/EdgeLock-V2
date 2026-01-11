@@ -1,8 +1,9 @@
 # backend/mappings.py
 
 NAME_MAP = {
-    # API-Football Name : CSV Name
+    # API-Football Name : CSV Name (Guesses)
     "Bayern Munich": "Bayern Munich",
+    "FC Bayern München": "Bayern Munich",
     "Borussia Dortmund": "Dortmund",
     "RB Leipzig": "RB Leipzig",
     "Union Berlin": "Union Berlin",
@@ -13,8 +14,8 @@ NAME_MAP = {
     "VfL Wolfsburg": "Wolfsburg",
     "Mainz 05": "Mainz 05",
     "1. FSV Mainz 05": "Mainz 05",
-    "Borussia Monchengladbach": "Gladbach",
-    "M'gladbach": "Gladbach",
+    "Borussia Monchengladbach": "M'gladbach",
+    "M'gladbach": "M'gladbach",
     "Werder Bremen": "Werder Bremen",
     "TSG 1899 Hoffenheim": "Hoffenheim",
     "TSG Hoffenheim": "Hoffenheim",
@@ -23,17 +24,15 @@ NAME_MAP = {
     "VfB Stuttgart": "Stuttgart",
     "VfL Bochum": "Bochum",
     "1. FC Heidenheim": "Heidenheim",
+    "1. FC Heidenheim 1846": "Heidenheim",
     "Heidenheim": "Heidenheim",
     "Darmstadt 98": "Darmstadt 98",
     "St. Pauli": "St. Pauli",
     "FC St. Pauli": "St. Pauli",
     "Holstein Kiel": "Holstein Kiel",
-    "Kiel": "Holstein Kiel",
-    "1. FC Koln": "Köln",
-    "FC Koln": "Köln",
-    "Koln": "Köln",
-    "Hertha Berlin": "Hertha BSC",
-    "Hertha BSC": "Hertha BSC",
-    "Schalke 04": "Schalke 04",
-    "FC Schalke 04": "Schalke 04"
+    "Kieler SV Holstein": "Holstein Kiel",
+    "1. FC Koln": "FC Koln",
+    "FC Koln": "FC Koln",
+    "Hertha Berlin": "Hertha",
+    "Hertha BSC": "Hertha"
 }
