@@ -1,7 +1,6 @@
 "use client";
 import React, { useState, useEffect } from "react";
 
-// ✅ Your Railway URL
 const BACKEND_URL = "https://edgelock-v2-production.up.railway.app"; 
 
 export default function EdgeLockPro() {
@@ -28,10 +27,11 @@ export default function EdgeLockPro() {
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 60000); // 1 min refresh
+    const interval = setInterval(fetchData, 60000); 
     return () => clearInterval(interval);
   }, []);
 
+  // Group matches by Date, but prioritize LIVE
   const groupedMatches = matches.reduce((acc: any, match) => {
     const date = new Date(match.date);
     let label = date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -39,13 +39,26 @@ export default function EdgeLockPro() {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
     
-    if (date.toDateString() === today.toDateString()) label = "Today";
+    // Check if Live
+    const isLive = ["1H", "2H", "HT", "ET", "P"].includes(match.score.status);
+
+    if (isLive) label = "LIVE NOW 🔥";
+    else if (date.toDateString() === today.toDateString()) label = "Today";
     else if (date.toDateString() === tomorrow.toDateString()) label = "Tomorrow";
 
     if (!acc[label]) acc[label] = [];
     acc[label].push(match);
     return acc;
   }, {});
+
+  // Sort groups: LIVE first, then Today, then Tomorrow
+  const sortedLabels = Object.keys(groupedMatches).sort((a, b) => {
+    if (a.includes("LIVE")) return -1;
+    if (b.includes("LIVE")) return 1;
+    if (a === "Today") return -1;
+    if (b === "Today") return 1;
+    return 0;
+  });
 
   if (loading) return <div className="min-h-screen bg-zinc-950 flex items-center justify-center text-emerald-500 font-mono animate-pulse">Scanning Bundesliga...</div>;
   if (error) return <div className="min-h-screen bg-zinc-950 flex items-center justify-center text-red-500">Connection Failed: {error}</div>;
@@ -79,13 +92,13 @@ export default function EdgeLockPro() {
         </div>
       ) : (
         <div className="grid gap-8">
-          {Object.entries(groupedMatches).map(([dateLabel, games]: [string, any]) => (
-            <div key={dateLabel} className={dateLabel === "Today" ? "bg-zinc-900/40 p-3 -m-3 rounded-2xl border border-zinc-800/50" : ""}>
-              <h2 className={`text-zinc-500 font-bold uppercase text-[10px] tracking-widest mb-3 pl-1 sticky top-0 py-3 backdrop-blur-md z-10 border-b border-transparent ${dateLabel === "Today" ? "text-emerald-400 border-zinc-800" : ""}`}>
+          {sortedLabels.map((dateLabel) => (
+            <div key={dateLabel} className={dateLabel.includes("LIVE") || dateLabel === "Today" ? "bg-zinc-900/40 p-3 -m-3 rounded-2xl border border-zinc-800/50" : ""}>
+              <h2 className={`text-zinc-500 font-bold uppercase text-[10px] tracking-widest mb-3 pl-1 sticky top-0 py-3 backdrop-blur-md z-10 border-b border-transparent ${dateLabel.includes("LIVE") ? "text-red-500 border-red-500/20" : dateLabel === "Today" ? "text-emerald-400 border-zinc-800" : ""}`}>
                 {dateLabel}
               </h2>
               <div className="grid gap-4">
-                {games.map((m: any) => (
+                {groupedMatches[dateLabel].map((m: any) => (
                   <MatchCard key={m.id} data={m} bankroll={bankroll} />
                 ))}
               </div>
@@ -102,51 +115,50 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
   const isLive = ["1H", "2H", "HT", "ET", "P"].includes(data.score.status);
   const roundDisplay = data.round ? data.round.replace("Regular Season - ", "MD ") : "";
 
-  // ODDS LOGIC
   const homeOdd = data.market_odds["1"] || 0;
   const awayOdd = data.market_odds["2"] || 0;
-  
-  // Risk (Orange if > 2.50)
   const homeRisky = homeOdd > 2.5;
   const awayRisky = awayOdd > 2.5;
-
   const dcHomeOdd = data.market_odds["1X"] || 0;
   const dcAwayOdd = data.market_odds["X2"] || 0;
 
   return (
-    <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden shadow-sm hover:border-zinc-700 transition-colors relative">
+    <div className={`bg-zinc-950 border rounded-xl overflow-hidden shadow-sm transition-colors relative ${isLive ? "border-red-500/30 shadow-red-900/10" : "border-zinc-800 hover:border-zinc-700"}`}>
       
       {/* HEADER */}
       <div className="p-4 pb-2 border-b border-zinc-900/50">
         <div className="flex justify-between items-start mb-3">
            <div>
-             <div className="text-[9px] text-zinc-600 uppercase tracking-widest font-bold">{data.league} <span className="text-zinc-700 font-normal">| {roundDisplay}</span></div>
-             {/* ✅ NEW: Predicted xG Display */}
+             <div className="text-[9px] text-zinc-600 uppercase tracking-widest font-bold flex gap-2">
+                {data.league} <span className="text-zinc-700 font-normal">| {roundDisplay}</span>
+             </div>
+             {/* MODEL PREDICTION */}
              {data.predicted_xg && (
-                <div className="text-[9px] text-emerald-500 font-mono mt-1">
-                  Model xG: {data.predicted_xg}
+                <div className="text-[10px] text-zinc-500 font-mono mt-1 flex items-center gap-1">
+                  <span>🧠 Pred:</span>
+                  <span className="text-emerald-400 font-bold">{data.predicted_xg}</span>
                 </div>
              )}
            </div>
            
            {isLive ? (
-             <div className="text-red-500 text-[10px] font-bold animate-pulse flex items-center gap-1">
-               <span className="w-1.5 h-1.5 bg-red-500 rounded-full inline-block"></span>
-               {data.score.time}'
+             <div className="bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full animate-pulse flex items-center gap-1">
+               LIVE {data.score.time}'
              </div>
            ) : (
              <div className="text-[10px] font-mono text-zinc-500 bg-zinc-900 px-1.5 py-0.5 rounded">{time}</div>
            )}
         </div>
 
-        <div className="flex flex-col gap-1.5 mb-2">
+        {/* TEAMS & SCORE */}
+        <div className="flex flex-col gap-2 mb-2">
            <div className="flex justify-between items-center">
              <div className="text-sm font-bold text-white">{data.home_team}</div>
-             {isLive && <div className="text-lg font-bold text-white">{data.score.goals_h}</div>}
+             {isLive && <div className="text-xl font-bold text-white font-mono">{data.score.goals_h}</div>}
            </div>
            <div className="flex justify-between items-center">
              <div className="text-sm font-bold text-zinc-400">{data.away_team}</div>
-             {isLive && <div className="text-lg font-bold text-zinc-400">{data.score.goals_a}</div>}
+             {isLive && <div className="text-xl font-bold text-zinc-400 font-mono">{data.score.goals_a}</div>}
            </div>
         </div>
       </div>
@@ -156,45 +168,15 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
         <div className="p-4 text-center text-xs text-zinc-600 italic">Insufficient historical data</div>
       ) : (
         <div className="p-4 pt-2 flex flex-col gap-1">
-          
-          {/* HOME (1) */}
-          <BettingRow 
-            label="1" 
-            prob={data.probs["1"]} fair={data.fair_odds["1"]} market={homeOdd} 
-            bankroll={bankroll} 
-            isRisky={homeRisky} 
-          />
-          
-          {/* HOME SAFE (1X) */}
+          <BettingRow label="1" prob={data.probs["1"]} fair={data.fair_odds["1"]} market={homeOdd} bankroll={bankroll} isRisky={homeRisky} />
           {homeRisky && dcHomeOdd > 0 && (
-             <BettingRow 
-               label="SAFE: 1X" 
-               prob={data.probs["1X"]} fair={data.fair_odds["1X"]} market={dcHomeOdd} 
-               bankroll={bankroll} 
-               highlight={true} 
-             />
+             <BettingRow label="SAFE: 1X" prob={data.probs["1X"]} fair={data.fair_odds["1X"]} market={dcHomeOdd} bankroll={bankroll} highlight={true} />
           )}
-
           <div className="h-px bg-zinc-900/50 my-1"></div>
-
-          {/* AWAY (2) */}
-          <BettingRow 
-            label="2" 
-            prob={data.probs["2"]} fair={data.fair_odds["2"]} market={awayOdd} 
-            bankroll={bankroll} 
-            isRisky={awayRisky} 
-          />
-
-          {/* AWAY SAFE (X2) */}
+          <BettingRow label="2" prob={data.probs["2"]} fair={data.fair_odds["2"]} market={awayOdd} bankroll={bankroll} isRisky={awayRisky} />
           {awayRisky && dcAwayOdd > 0 && (
-             <BettingRow 
-               label="SAFE: X2" 
-               prob={data.probs["X2"]} fair={data.fair_odds["X2"]} market={dcAwayOdd} 
-               bankroll={bankroll} 
-               highlight={true} 
-             />
+             <BettingRow label="SAFE: X2" prob={data.probs["X2"]} fair={data.fair_odds["X2"]} market={dcAwayOdd} bankroll={bankroll} highlight={true} />
           )}
-
         </div>
       )}
     </div>
@@ -211,43 +193,24 @@ function BettingRow({ label, prob, fair, market, bankroll, highlight, isRisky }:
 
   return (
     <div className={`grid grid-cols-12 gap-2 items-center mb-1 p-2 rounded transition-all ${highlight ? "bg-emerald-900/10 border border-emerald-500/20" : "hover:bg-zinc-900/40 border border-transparent"}`}>
-      
-      {/* Label */}
       <div className="col-span-4 flex flex-col justify-center leading-tight">
-        <div className={`text-xs font-bold ${highlight ? "text-emerald-400" : isRisky ? "text-orange-400" : "text-zinc-300"}`}>
-          {label}
-        </div>
+        <div className={`text-xs font-bold ${highlight ? "text-emerald-400" : isRisky ? "text-orange-400" : "text-zinc-300"}`}>{label}</div>
       </div>
-      
-      {/* Fair Odds + Probability */}
       <div className="col-span-3 flex flex-col items-center">
         <div className="text-[8px] text-zinc-600 uppercase">Fair</div>
-        <div className="text-xs font-bold text-zinc-400">
-           {fair?.toFixed(2)} <span className="text-[9px] text-zinc-600 font-normal">({prob?.toFixed(0)}%)</span>
-        </div>
+        <div className="text-xs font-bold text-zinc-400">{fair?.toFixed(2)} <span className="text-[9px] text-zinc-600 font-normal">({prob?.toFixed(0)}%)</span></div>
       </div>
-
-      {/* User Input */}
       <div className="col-span-2 flex flex-col items-center">
         <div className="text-[8px] text-zinc-600 uppercase">Bookie</div>
-        <input 
-          type="number" step="0.01"
-          className={`w-12 bg-black/50 border text-center font-bold rounded py-0.5 text-xs outline-none focus:bg-black transition-colors ${isRisky ? "text-orange-400 border-orange-500/30" : "text-white border-zinc-800 focus:border-emerald-500"}`}
-          value={userOdds}
-          onChange={(e) => setUserOdds(parseFloat(e.target.value))}
-        />
+        <input type="number" step="0.01" className={`w-12 bg-black/50 border text-center font-bold rounded py-0.5 text-xs outline-none focus:bg-black transition-colors ${isRisky ? "text-orange-400 border-orange-500/30" : "text-white border-zinc-800 focus:border-emerald-500"}`} value={userOdds} onChange={(e) => setUserOdds(parseFloat(e.target.value))} />
       </div>
-
-      {/* Edge & Bet Size */}
       <div className="col-span-3 flex justify-end">
         {edge > 0 ? (
           <div className="flex flex-col items-end">
              <div className="text-emerald-400 text-xs font-bold">+{(edge * 100).toFixed(1)}%</div>
              <div className="text-[10px] text-emerald-100 bg-emerald-500/20 px-1.5 py-px rounded mt-0.5 font-mono">€{betAmount.toFixed(0)}</div>
           </div>
-        ) : (
-          <div className="text-zinc-800 text-xs">-</div>
-        )}
+        ) : ( <div className="text-zinc-800 text-xs">-</div> )}
       </div>
     </div>
   );

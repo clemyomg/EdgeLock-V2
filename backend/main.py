@@ -14,7 +14,7 @@ from database import engine, get_db, Base
 from models import MatchPrediction
 from mappings import NAME_MAP
 
-# Create Tables automatically (if they don't exist)
+# Create Tables automatically
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -23,7 +23,7 @@ app = FastAPI()
 FOOTBALL_API_KEY = "7bea55228c0e0fbd7de71e7f5ff3802f"
 LEAGUE_CONFIG = { "Bundesliga": 78 } 
 CURRENT_SEASON = 2025 
-CACHE_DURATION = 600 
+CACHE_DURATION = 60 # Faster refresh for LIVE games (1 min)
 
 api_cache = { "last_updated": 0, "data": [] }
 league_stats = {}
@@ -38,7 +38,7 @@ app.add_middleware(
 def normalize_name(name):
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
-# --- 1. TRAINING (Unchanged) ---
+# --- 1. TRAINING ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
     if not os.path.exists(folder_path): return None
@@ -89,7 +89,7 @@ def train_league_model(league_name):
 train_res = train_league_model("Bundesliga")
 if train_res: league_stats["Bundesliga"] = train_res
 
-# --- 2. MATH & PROBABILITIES ---
+# --- 2. MATH ---
 def calculate_all_probabilities(league, home, away):
     if league not in league_stats: return None
     db_stats = league_stats[league]
@@ -98,7 +98,6 @@ def calculate_all_probabilities(league, home, away):
     home_mapped = NAME_MAP.get(home, home)
     away_mapped = NAME_MAP.get(away, away)
 
-    # Fuzzy Fallback
     if home_mapped not in stats:
         for k in stats.keys():
             if normalize_name(home) == normalize_name(k):
@@ -133,7 +132,7 @@ def calculate_all_probabilities(league, home, away):
         "xg_a": xg_a
     }
 
-# --- 3. MAIN ENDPOINT (Now with DB Saving) ---
+# --- 3. MAIN ENDPOINT (MERGED LIVE + UPCOMING) ---
 @app.get("/live-edges")
 def get_live_edges(db: Session = Depends(get_db)):
     current_time = time.time()
@@ -141,23 +140,47 @@ def get_live_edges(db: Session = Depends(get_db)):
     if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]:
         return api_cache["data"]
 
-    print(f"🚀 Fetching Data & Saving to DB...")
-    final_results = []
+    print(f"🚀 Fetching Live & Upcoming Data...")
     
     headers = {
         "x-rapidapi-key": FOOTBALL_API_KEY,
         "x-rapidapi-host": "v3.football.api-sports.io"
     }
 
-    url_fixtures = f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&next=30"
-    
-    try:
-        res_fix = requests.get(url_fixtures, headers=headers)
-        if res_fix.status_code != 200: return []
+    combined_fixtures = []
+    seen_ids = set()
 
-        fixtures = res_fix.json().get("response", [])
-        
-        for f in fixtures:
+    # 1️⃣ FETCH LIVE GAMES (Status: Playing)
+    try:
+        url_live = f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&live=all"
+        res_live = requests.get(url_live, headers=headers)
+        if res_live.status_code == 200:
+            live_games = res_live.json().get("response", [])
+            for g in live_games:
+                if g["fixture"]["id"] not in seen_ids:
+                    combined_fixtures.append(g)
+                    seen_ids.add(g["fixture"]["id"])
+            print(f"⚡ Found {len(live_games)} LIVE matches.")
+    except Exception as e: print(f"⚠️ Live Fetch Error: {e}")
+
+    # 2️⃣ FETCH UPCOMING GAMES (Next 30)
+    try:
+        url_next = f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&next=30"
+        res_next = requests.get(url_next, headers=headers)
+        if res_next.status_code == 200:
+            next_games = res_next.json().get("response", [])
+            for g in next_games:
+                if g["fixture"]["id"] not in seen_ids:
+                    combined_fixtures.append(g)
+                    seen_ids.add(g["fixture"]["id"])
+            print(f"📅 Found {len(next_games)} upcoming matches.")
+    except Exception as e: print(f"⚠️ Upcoming Fetch Error: {e}")
+
+    # --- PROCESS ALL ---
+    final_results = []
+    
+    for f in combined_fixtures:
+        try:
             fix_id = f["fixture"]["id"]
             home_name = f["teams"]["home"]["name"]
             away_name = f["teams"]["away"]["name"]
@@ -173,52 +196,43 @@ def get_live_edges(db: Session = Depends(get_db)):
                 fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items() if k in ["1","X","2","1X","X2"]}
                 predicted_score = f"{probs['xg_h']:.2f} - {probs['xg_a']:.2f}"
 
-                # 💾 SAVE TO DATABASE ("The Ledger")
-                # 🛑 FIX: We verify if the record exists first
+                # 💾 SAVE TO DB
                 existing_pred = db.query(MatchPrediction).filter(MatchPrediction.fixture_id == fix_id).first()
-                
                 if not existing_pred:
-                    # ✅ FIX: Convert all NumPy types to standard float()
                     new_pred = MatchPrediction(
                         fixture_id=fix_id,
                         home_team=home_name,
                         away_team=away_name,
                         league="Bundesliga",
                         match_date=f["fixture"]["date"],
-                        model_home_xg=float(probs['xg_h']),  # 👈 Added float()
-                        model_away_xg=float(probs['xg_a']),  # 👈 Added float()
-                        fair_odd_home=float(fair_odds.get("1", 0)), # 👈 Added float()
-                        fair_odd_draw=float(fair_odds.get("X", 0)), # 👈 Added float()
-                        fair_odd_away=float(fair_odds.get("2", 0))  # 👈 Added float()
+                        model_home_xg=float(probs['xg_h']),
+                        model_away_xg=float(probs['xg_a']),
+                        fair_odd_home=float(fair_odds.get("1", 0)),
+                        fair_odd_draw=float(fair_odds.get("X", 0)),
+                        fair_odd_away=float(fair_odds.get("2", 0))
                     )
                     db.add(new_pred)
                     db.commit()
-                    print(f"✅ Booked: {home_name} vs {away_name}")
-                else:
-                    # Update existing (converting here too just in case)
-                    existing_pred.model_home_xg = float(probs['xg_h'])
-                    existing_pred.model_away_xg = float(probs['xg_a'])
-                    db.commit()
 
-            market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
-            
+            # Odds
+            market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0 }
+            # Only fetch odds if not live (to save API calls) or if it's a big game. 
+            # Actually, let's fetch for all to be safe.
             url_odds = f"https://v3.football.api-sports.io/odds?fixture={fix_id}"
             res_odds = requests.get(url_odds, headers=headers).json()
             
             if res_odds.get("response"):
                 all_bookies = res_odds["response"][0]["bookmakers"]
                 for bookie in all_bookies:
-                    if market_odds["1"] > 0 and market_odds["1X"] > 0: break 
-                    
+                    if market_odds["1"] > 0: break 
                     for bet in bookie["bets"]:
-                        if bet["id"] == 1 and market_odds["1"] == 0:
-                            for v in bet["values"]:
+                        if bet["id"] == 1: # 1X2
+                             for v in bet["values"]:
                                 if v["value"] == "Home": market_odds["1"] = float(v["odd"])
                                 if v["value"] == "Away": market_odds["2"] = float(v["odd"])
                                 if v["value"] == "Draw": market_odds["X"] = float(v["odd"])
-                        
-                        if bet["id"] == 12 and market_odds["1X"] == 0:
-                            for v in bet["values"]:
+                        if bet["id"] == 12: # DC
+                             for v in bet["values"]:
                                 if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
                                 if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
 
@@ -231,8 +245,8 @@ def get_live_edges(db: Session = Depends(get_db)):
                 "league": "Bundesliga",
                 "round": f["league"]["round"],
                 "score": {
-                    "status": f["fixture"]["status"]["short"],
-                    "time": f["fixture"]["status"]["elapsed"],
+                    "status": f["fixture"]["status"]["short"], # e.g. "1H", "2H", "HT"
+                    "time": f["fixture"]["status"]["elapsed"], # e.g. 60
                     "goals_h": f["goals"]["home"],
                     "goals_a": f["goals"]["away"]
                 },
@@ -242,9 +256,8 @@ def get_live_edges(db: Session = Depends(get_db)):
                 "predicted_xg": predicted_score,
                 "market_odds": market_odds
             })
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
+        except Exception as e:
+            print(f"❌ Error processing fixture {f['fixture']['id']}: {e}")
 
     final_results.sort(key=lambda x: x['date'])
     api_cache["data"] = final_results
