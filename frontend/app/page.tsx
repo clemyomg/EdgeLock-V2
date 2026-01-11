@@ -31,7 +31,6 @@ export default function EdgeLockPro() {
     return () => clearInterval(interval);
   }, []);
 
-  // Group matches by Date, but prioritize LIVE
   const groupedMatches = matches.reduce((acc: any, match) => {
     const date = new Date(match.date);
     let label = date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -39,7 +38,6 @@ export default function EdgeLockPro() {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
     
-    // Check if Live
     const isLive = ["1H", "2H", "HT", "ET", "P"].includes(match.score.status);
 
     if (isLive) label = "LIVE NOW 🔥";
@@ -51,7 +49,6 @@ export default function EdgeLockPro() {
     return acc;
   }, {});
 
-  // Sort groups: LIVE first, then Today, then Tomorrow
   const sortedLabels = Object.keys(groupedMatches).sort((a, b) => {
     if (a.includes("LIVE")) return -1;
     if (b.includes("LIVE")) return 1;
@@ -126,7 +123,8 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
     <div className={`bg-zinc-950 border rounded-xl overflow-hidden shadow-sm transition-colors relative ${isLive ? "border-red-500/30 shadow-red-900/10" : "border-zinc-800 hover:border-zinc-700"}`}>
       
       {/* HEADER */}
-      <div className="p-4 pb-2 border-b border-zinc-900/50">
+      {/* Removed border-b if live to make it look cleaner since nothing is below */}
+      <div className={`p-4 pb-2 ${!isLive ? "border-b border-zinc-900/50" : ""}`}>
         <div className="flex justify-between items-start mb-3">
            <div>
              <div className="text-[9px] text-zinc-600 uppercase tracking-widest font-bold flex gap-2">
@@ -163,21 +161,23 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
         </div>
       </div>
 
-      {/* ODDS CONTENT */}
-      {!data.has_model ? (
-        <div className="p-4 text-center text-xs text-zinc-600 italic">Insufficient historical data</div>
-      ) : (
-        <div className="p-4 pt-2 flex flex-col gap-1">
-          <BettingRow label="1" prob={data.probs["1"]} fair={data.fair_odds["1"]} market={homeOdd} bankroll={bankroll} isRisky={homeRisky} />
-          {homeRisky && dcHomeOdd > 0 && (
-             <BettingRow label="SAFE: 1X" prob={data.probs["1X"]} fair={data.fair_odds["1X"]} market={dcHomeOdd} bankroll={bankroll} highlight={true} />
-          )}
-          <div className="h-px bg-zinc-900/50 my-1"></div>
-          <BettingRow label="2" prob={data.probs["2"]} fair={data.fair_odds["2"]} market={awayOdd} bankroll={bankroll} isRisky={awayRisky} />
-          {awayRisky && dcAwayOdd > 0 && (
-             <BettingRow label="SAFE: X2" prob={data.probs["X2"]} fair={data.fair_odds["X2"]} market={dcAwayOdd} bankroll={bankroll} highlight={true} />
-          )}
-        </div>
+      {/* ODDS CONTENT - HIDDEN WHEN LIVE */}
+      {!isLive && (
+        !data.has_model ? (
+          <div className="p-4 text-center text-xs text-zinc-600 italic">Insufficient historical data</div>
+        ) : (
+          <div className="p-4 pt-2 flex flex-col gap-1">
+            <BettingRow label="1" prob={data.probs["1"]} fair={data.fair_odds["1"]} market={homeOdd} bankroll={bankroll} isRisky={homeRisky} />
+            {homeRisky && dcHomeOdd > 0 && (
+               <BettingRow label="SAFE: 1X" prob={data.probs["1X"]} fair={data.fair_odds["1X"]} market={dcHomeOdd} bankroll={bankroll} highlight={true} />
+            )}
+            <div className="h-px bg-zinc-900/50 my-1"></div>
+            <BettingRow label="2" prob={data.probs["2"]} fair={data.fair_odds["2"]} market={awayOdd} bankroll={bankroll} isRisky={awayRisky} />
+            {awayRisky && dcAwayOdd > 0 && (
+               <BettingRow label="SAFE: X2" prob={data.probs["X2"]} fair={data.fair_odds["X2"]} market={dcAwayOdd} bankroll={bankroll} highlight={true} />
+            )}
+          </div>
+        )
       )}
     </div>
   );
