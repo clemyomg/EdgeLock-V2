@@ -174,16 +174,16 @@ def get_live_edges():
     print("🔄 Fetching New Odds...")
     for league, key in LEAGUE_CONFIG.items():
         try:
-            # 1. Attempt to fetch FULL markets (might fail on free plan sometimes)
+            # 1. Attempt to fetch FULL markets
             url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,doublechance,spreads&oddsFormat=decimal"
             res = requests.get(url).json()
             
-            # 2. Fallback: If quota exceeded or error, try SIMPLE fetch
+            # 2. Fallback to basic
             if not isinstance(res, list):
                 print(f"⚠️ Complex Fetch Failed: {res}. Retrying with Basic...")
                 url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal"
                 res = requests.get(url).json()
-                if not isinstance(res, list): continue # Give up if even basic fails
+                if not isinstance(res, list): continue 
 
             for game in res:
                 home, away = game['home_team'], game['away_team']
@@ -210,21 +210,26 @@ def get_live_edges():
                             elif o['name'] == away: market_odds["2"] = o['price']
                             elif o['name'] == 'Draw': market_odds["X"] = o['price']
                     
-                    # Double Chance (Not always available)
+                    # ✅ IMPROVED DOUBLE CHANCE (Case Insensitive Matching)
                     dc = next((m for m in bookie['markets'] if m['key'] == 'doublechance'), None)
                     if dc:
                         for o in dc['outcomes']:
-                            if (home in o['name'] or 'Home' in o['name']) and 'Draw' in o['name']: market_odds["1X"] = o['price']
-                            if (away in o['name'] or 'Away' in o['name']) and 'Draw' in o['name']: market_odds["X2"] = o['price']
+                            name = o['name'].lower()
+                            # 1X: Contains Home OR "Home", AND Contains "Draw"
+                            if (home.lower() in name or "home" in name) and "draw" in name: 
+                                market_odds["1X"] = o['price']
+                            # X2: Contains Away OR "Away", AND Contains "Draw"
+                            if (away.lower() in name or "away" in name) and "draw" in name: 
+                                market_odds["X2"] = o['price']
 
-                    # Spreads
+                    # ✅ IMPROVED SPREADS (Case Insensitive Matching)
                     spreads = next((m for m in bookie['markets'] if m['key'] == 'spreads'), None)
                     if spreads:
                         for o in spreads['outcomes']:
-                            if o['name'] == home: 
+                            if o['name'].lower() == home.lower(): 
                                 market_odds["H_Spread"] = o['price']
                                 market_odds["H_Spread_Point"] = o['point']
-                            elif o['name'] == away: 
+                            elif o['name'].lower() == away.lower(): 
                                 market_odds["A_Spread"] = o['price']
                                 market_odds["A_Spread_Point"] = o['point']
 

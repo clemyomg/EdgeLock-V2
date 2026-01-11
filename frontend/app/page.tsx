@@ -116,7 +116,7 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
   const dcHomeOdd = data.market_odds["1X"] || 0;
   const dcAwayOdd = data.market_odds["X2"] || 0;
   
-  // Only show handicap if Double Chance is ALSO risky (> 2.50) OR if Double Chance is 0 (missing)
+  // Show handicap if DC is risky OR if DC is missing (0)
   const showHomeHandicap = (dcHomeOdd > 2.5 || dcHomeOdd === 0);
   const showAwayHandicap = (dcAwayOdd > 2.5 || dcAwayOdd === 0);
 
@@ -155,9 +155,9 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
       ) : (
         <div className="p-4 pt-2 flex flex-col gap-1">
           
-          {/* HOME */}
+          {/* HOME (1) */}
           <BettingRow 
-            label="Home Win" 
+            label="1" 
             prob={data.probs["1"]} fair={data.fair_odds["1"]} market={homeOdd} 
             bankroll={bankroll} 
             warning={homeRisky ? "⚠️ Higher Risk" : ""} 
@@ -167,14 +167,14 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
           {homeRisky && (
              !showHomeHandicap ? (
                <BettingRow 
-                 label="↳ Safer Option (1X)" 
+                 label="SAFE: 1X" 
                  prob={data.probs["1X"]} fair={data.fair_odds["1X"]} market={dcHomeOdd} 
                  bankroll={bankroll} 
                  highlight={true} 
                />
              ) : (
                <BettingRow 
-                 label={`↳ Safer Option (H ${data.market_odds["H_Spread_Point"] > 0 ? "+" : ""}${data.market_odds["H_Spread_Point"]})`} 
+                 label={`SAFE: 1 (${data.market_odds["H_Spread_Point"] > 0 ? "+" : ""}${data.market_odds["H_Spread_Point"]})`} 
                  prob={data.probs["1X"]} fair={data.fair_odds["1X"]} market={data.market_odds["H_Spread"]} 
                  bankroll={bankroll} 
                  highlight={true} 
@@ -184,9 +184,9 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
 
           <div className="h-px bg-zinc-900/50 my-1"></div>
 
-          {/* AWAY */}
+          {/* AWAY (2) */}
           <BettingRow 
-            label="Away Win" 
+            label="2" 
             prob={data.probs["2"]} fair={data.fair_odds["2"]} market={awayOdd} 
             bankroll={bankroll} 
             warning={awayRisky ? "⚠️ Higher Risk" : ""} 
@@ -196,14 +196,14 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
           {awayRisky && (
              !showAwayHandicap ? (
                <BettingRow 
-                 label="↳ Safer Option (X2)" 
+                 label="SAFE: X2" 
                  prob={data.probs["X2"]} fair={data.fair_odds["X2"]} market={dcAwayOdd} 
                  bankroll={bankroll} 
                  highlight={true} 
                />
              ) : (
                <BettingRow 
-                 label={`↳ Safer Option (A ${data.market_odds["A_Spread_Point"] > 0 ? "+" : ""}${data.market_odds["A_Spread_Point"]})`} 
+                 label={`SAFE: 2 (${data.market_odds["A_Spread_Point"] > 0 ? "+" : ""}${data.market_odds["A_Spread_Point"]})`} 
                  prob={data.probs["X2"]} fair={data.fair_odds["X2"]} market={data.market_odds["A_Spread"]} 
                  bankroll={bankroll} 
                  highlight={true} 
@@ -223,7 +223,7 @@ function BettingRow({ label, prob, fair, market, bankroll, highlight, warning }:
 
   const edge = userOdds > 0 ? ((prob / 100) * userOdds) - 1 : 0;
   
-  // Kelly Criterion (Fractional)
+  // Kelly Criterion
   const kellyFraction = edge > 0 ? (((userOdds - 1) * (prob/100) - (1 - (prob/100))) / (userOdds - 1)) * 0.25 : 0;
   const betAmount = kellyFraction * bankroll;
 
