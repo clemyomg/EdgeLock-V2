@@ -15,10 +15,10 @@ app = FastAPI()
 
 # --- CONFIG ---
 FOOTBALL_API_KEY = "7bea55228c0e0fbd7de71e7f5ff3802f"
-LEAGUE_CONFIG = { "Bundesliga": 78 } # Bundesliga ID
-CURRENT_SEASON = 2025 # ✅ UPDATED TO 2025 (For 2025-2026 Season)
+LEAGUE_CONFIG = { "Bundesliga": 78 } 
+CURRENT_SEASON = 2025 # 2025-2026 Season
 
-# Caching (Updates every 10 mins since you have Pro plan)
+# Caching (10 mins)
 CACHE_DURATION = 600 
 
 # --- MEMORY ---
@@ -37,14 +37,13 @@ app.add_middleware(
 
 # --- HELPER: NAME NORMALIZER ---
 def normalize_name(name):
+    # Removes common prefixes/suffixes to help matching
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
 # --- 1. TRAINING LOGIC ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
-    if not os.path.exists(folder_path): 
-        print(f"⚠️ Warning: Data folder not found: {folder_path}")
-        return None
+    if not os.path.exists(folder_path): return None
 
     dfs = []
     for file in os.listdir(folder_path):
@@ -53,9 +52,7 @@ def train_league_model(league_name):
                 dfs.append(pd.read_csv(os.path.join(folder_path, file)))
             except: pass
     
-    if not dfs: 
-        print(f"⚠️ Warning: No CSV files found in {folder_path}")
-        return None
+    if not dfs: return None
     
     full_df = pd.concat(dfs)
     df = full_df[full_df['Result'].notna()].copy()
@@ -84,8 +81,8 @@ def train_league_model(league_name):
                 'att_a': np.average(ta[metric], weights=ta['weight']) / avg_a,
                 'def_a': np.average(ta['xGA'], weights=ta['weight']) / avg_h
             }
-    
-    print(f"✅ Trained Model for {league_name}: {len(stats)} teams loaded.")
+            
+    print(f"✅ Trained {league_name}: {len(stats)} teams.")
     return {"stats": stats, "avg_h": avg_h, "avg_a": avg_a}
 
 # Train on Startup
@@ -98,21 +95,25 @@ def calculate_all_probabilities(league, home, away):
     db = league_stats[league]
     stats = db["stats"]
     
-    # Map API-Football Name -> CSV Name
+    # 1. Try Exact Map
     home_mapped = NAME_MAP.get(home, home)
     away_mapped = NAME_MAP.get(away, away)
 
-    # Smart fallback: Try normalize if map fails
+    # 2. Try Fuzzy Match (if not found in stats)
     if home_mapped not in stats:
         for k in stats.keys():
-            if normalize_name(home) in normalize_name(k):
+            if normalize_name(home) == normalize_name(k):
                 home_mapped = k
                 break
     if away_mapped not in stats:
         for k in stats.keys():
-            if normalize_name(away) in normalize_name(k):
+            if normalize_name(away) == normalize_name(k):
                 away_mapped = k
                 break
+
+    # Debug Log for missing teams
+    if home_mapped not in stats: print(f"⚠️ Missing Data: {home} (mapped: {home_mapped})")
+    if away_mapped not in stats: print(f"⚠️ Missing Data: {away} (mapped: {away_mapped})")
 
     if home_mapped not in stats or away_mapped not in stats: return None
 
@@ -146,11 +147,9 @@ def get_live_edges():
     
     # Cache Check
     if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]:
-        print("⚡ Serving from Cache")
         return api_cache["data"]
 
-    print(f"🚀 Fetching Fresh Data from API-Football (Season {CURRENT_SEASON})...")
-    
+    print(f"🚀 Fetching Fresh Data (Season {CURRENT_SEASON})...")
     final_results = []
     
     headers = {
@@ -158,26 +157,21 @@ def get_live_edges():
         "x-rapidapi-host": "v3.football.api-sports.io"
     }
 
-    # 1. Fetch Next 30 Fixtures (Bundesliga)
+    # Fetch Next 30 Fixtures
     url_fixtures = f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&next=30"
     
     try:
         res_fix = requests.get(url_fixtures, headers=headers)
-        print(f"📡 API Response Code: {res_fix.status_code}")
-        
-        if res_fix.status_code != 200:
-             print(f"❌ API Error Message: {res_fix.text}")
-             return []
+        if res_fix.status_code != 200: return []
 
         fixtures = res_fix.json().get("response", [])
-        print(f"🗓️ Found {len(fixtures)} upcoming fixtures.")
         
         for f in fixtures:
             fix_id = f["fixture"]["id"]
             home_name = f["teams"]["home"]["name"]
             away_name = f["teams"]["away"]["name"]
             
-            # 2. CALCULATE PROBABILITIES
+            # MODEL
             probs = calculate_all_probabilities("Bundesliga", home_name, away_name)
             
             has_model = False
@@ -187,28 +181,30 @@ def get_live_edges():
                 model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
                 fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
 
-            # 3. FETCH ODDS FOR THIS GAME (1 call per game)
+            # ODDS (Loop until found)
             market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
             
             url_odds = f"https://v3.football.api-sports.io/odds?fixture={fix_id}"
             res_odds = requests.get(url_odds, headers=headers).json()
             
             if res_odds.get("response"):
-                # Pick reliable bookmaker (Bet365=1, Bwin=6, Unibet=8)
-                bookmakers = res_odds["response"][0]["bookmakers"]
-                bookie = next((b for b in bookmakers if b["id"] == 1 or b["id"] == 8), bookmakers[0] if bookmakers else None)
+                # 🔄 NEW: Scan ALL bookmakers, not just ID 1
+                all_bookies = res_odds["response"][0]["bookmakers"]
                 
-                if bookie:
+                for bookie in all_bookies:
+                    # If we already found odds, stop searching
+                    if market_odds["1"] > 0 and market_odds["1X"] > 0: break 
+                    
                     for bet in bookie["bets"]:
                         # 1X2 (ID: 1)
-                        if bet["id"] == 1:
+                        if bet["id"] == 1 and market_odds["1"] == 0:
                             for v in bet["values"]:
                                 if v["value"] == "Home": market_odds["1"] = float(v["odd"])
                                 if v["value"] == "Away": market_odds["2"] = float(v["odd"])
                                 if v["value"] == "Draw": market_odds["X"] = float(v["odd"])
                         
                         # Double Chance (ID: 12)
-                        if bet["id"] == 12:
+                        if bet["id"] == 12 and market_odds["1X"] == 0:
                             for v in bet["values"]:
                                 if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
                                 if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
@@ -234,9 +230,8 @@ def get_live_edges():
             })
 
     except Exception as e:
-        print(f"❌ Critical Error: {e}")
+        print(f"❌ Error: {e}")
 
-    # Sort by Date
     final_results.sort(key=lambda x: x['date'])
     
     api_cache["data"] = final_results
