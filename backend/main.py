@@ -8,7 +8,7 @@ from scipy.stats import poisson
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# ✅ Import your map
+# ✅ Import your aligned map
 from mappings import NAME_MAP
 
 app = FastAPI()
@@ -34,26 +34,30 @@ app.add_middleware(
 
 # --- HELPER: NAME NORMALIZER ---
 def normalize_name(name):
-    # Removes common prefixes/suffixes to help matching
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
-# --- 1. TRAINING LOGIC (With Debugging) ---
+# --- 1. TRAINING LOGIC (With Team Name Debugging) ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
     if not os.path.exists(folder_path): 
-        print(f"⚠️ Error: Folder not found {folder_path}")
+        print(f"⚠️ Error: Folder {folder_path} not found.")
         return None
 
     dfs = []
+    print(f"📂 Loading CSVs from {folder_path}...")
     for file in os.listdir(folder_path):
         if file.endswith(".csv"):
             try:
+                # print(f"  - Reading {file}") 
                 dfs.append(pd.read_csv(os.path.join(folder_path, file)))
             except: pass
     
-    if not dfs: return None
+    if not dfs: 
+        print("❌ No CSV files found!")
+        return None
     
     full_df = pd.concat(dfs)
+    # Ensure we use valid results
     df = full_df[full_df['Result'].notna()].copy()
     
     df['DateObj'] = pd.to_datetime(df['Date'], errors='coerce')
@@ -61,8 +65,7 @@ def train_league_model(league_name):
     df['weight'] = np.exp(-0.0025 * (latest - df['DateObj']).dt.days)
 
     metric = 'xG' if 'xG' in df.columns else 'GF'
-    # Fallback if xG is missing
-    if metric not in df.columns: metric = 'GF'
+    if metric not in df.columns: metric = 'GF' # Fallback
 
     game_map = df.set_index(['Date', 'Team'])[metric].to_dict()
     df['xGA'] = df.apply(lambda r: game_map.get((r['Date'], r['Opp']), 0), axis=1)
@@ -73,9 +76,12 @@ def train_league_model(league_name):
     avg_a = np.average(a_games[metric], weights=a_games['weight'])
 
     stats = {}
-    for team in df['Team'].unique():
+    teams_found = df['Team'].unique()
+    
+    for team in teams_found:
         th = h_games[h_games['Team'] == team]
         ta = a_games[a_games['Team'] == team]
+        # Only model teams with enough data (>2 games)
         if len(th) > 2:
             stats[team] = {
                 'att_h': np.average(th[metric], weights=th['weight']) / avg_h,
@@ -84,46 +90,50 @@ def train_league_model(league_name):
                 'def_a': np.average(ta['xGA'], weights=ta['weight']) / avg_h
             }
             
-    print(f"✅ LOADED TEAMS FOR {league_name}: {list(stats.keys())}") # 👈 THIS WILL SHOW IN LOGS
+    # 🚨 CRITICAL DEBUG: Print exactly what teams we have
+    print(f"✅ MODEL TRAINED. Loaded {len(stats)} teams.")
+    print(f"📋 AVAILABLE TEAMS IN CSV: {sorted(list(stats.keys()))}")
+    
     return {"stats": stats, "avg_h": avg_h, "avg_a": avg_a}
 
 # Train on Startup
 train_res = train_league_model("Bundesliga")
 if train_res: league_stats["Bundesliga"] = train_res
 
-# --- 2. SMART MATCHING ENGINE ---
-def find_best_match_key(target_name, stats_keys):
-    # 1. Exact Match
-    if target_name in stats_keys: return target_name
-    
-    # 2. Mapped Match
-    mapped = NAME_MAP.get(target_name)
-    if mapped and mapped in stats_keys: return mapped
-
-    # 3. Normalized Fuzzy Match
-    norm_target = normalize_name(target_name)
-    for k in stats_keys:
-        norm_k = normalize_name(k)
-        # Check if one contains the other (e.g. "Bayern" in "Bayern Munchen")
-        if norm_target in norm_k or norm_k in norm_target:
-            return k
-            
-    return None
-
+# --- 2. MATCHING ENGINE ---
 def calculate_all_probabilities(league, home, away):
     if league not in league_stats: return None
     db = league_stats[league]
     stats = db["stats"]
     
-    # Use Smart Matcher
-    home_key = find_best_match_key(home, stats.keys())
-    away_key = find_best_match_key(away, stats.keys())
+    # 1. Use the Hardcoded Map
+    home_mapped = NAME_MAP.get(home, home)
+    away_mapped = NAME_MAP.get(away, away)
 
-    if not home_key or not away_key:
-        print(f"❌ FAILED MATCH: {home} (Found: {home_key}) vs {away} (Found: {away_key})")
-        return None
+    # 2. Last Resort: Fuzzy Match (Only if exact fail)
+    if home_mapped not in stats:
+        for k in stats.keys():
+            if normalize_name(home) == normalize_name(k):
+                home_mapped = k
+                break
+    if away_mapped not in stats:
+        for k in stats.keys():
+            if normalize_name(away) == normalize_name(k):
+                away_mapped = k
+                break
 
-    h, a = stats[home_key], stats[away_key]
+    # 🚨 DEBUG LOGGING FOR MISSING TEAMS
+    missing = False
+    if home_mapped not in stats:
+        print(f"❌ MISSING HOME: API='{home}' -> Mapped='{home_mapped}' -> NOT IN CSV!")
+        missing = True
+    if away_mapped not in stats:
+        print(f"❌ MISSING AWAY: API='{away}' -> Mapped='{away_mapped}' -> NOT IN CSV!")
+        missing = True
+    
+    if missing: return None
+
+    h, a = stats[home_mapped], stats[away_mapped]
     xg_h = h['att_h'] * a['def_a'] * db['avg_h']
     xg_a = a['att_a'] * h['def_h'] * db['avg_a']
 
@@ -146,7 +156,7 @@ def calculate_all_probabilities(league, home, away):
         "O2.5": prob_o25, "U2.5": 1 - prob_o25
     }
 
-# --- 3. API-FOOTBALL ENGINE ---
+# --- 3. API ENGINE ---
 @app.get("/live-edges")
 def get_live_edges():
     current_time = time.time()
@@ -209,6 +219,16 @@ def get_live_edges():
                             for v in bet["values"]:
                                 if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
                                 if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
+
+                        if bet["id"] == 4 and market_odds["H_Spread"] == 0: # Asian Handicap
+                             for v in bet["values"]:
+                                 # Usually API Football Asian format: "Home", "Away" with separate handicap field or implicitly handled
+                                 # We store generic for now.
+                                 if v["value"] == "Home": 
+                                     market_odds["H_Spread"] = float(v["odd"])
+                                     # Try to grab handicap value from API response string if available
+                                     # Not implementing complex string parsing to avoid crash, assume simple structure
+                                     pass
 
             final_results.append({
                 "id": fix_id,
