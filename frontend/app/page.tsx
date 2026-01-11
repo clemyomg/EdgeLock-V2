@@ -118,8 +118,17 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
       
       {/* HEADER */}
       <div className="p-4 pb-2 border-b border-zinc-900/50">
-        <div className="flex justify-between items-center mb-3">
-           <div className="text-[9px] text-zinc-600 uppercase tracking-widest font-bold">{data.league} <span className="text-zinc-700 font-normal">| {roundDisplay}</span></div>
+        <div className="flex justify-between items-start mb-3">
+           <div>
+             <div className="text-[9px] text-zinc-600 uppercase tracking-widest font-bold">{data.league} <span className="text-zinc-700 font-normal">| {roundDisplay}</span></div>
+             {/* ✅ NEW: Predicted xG Display */}
+             {data.predicted_xg && (
+                <div className="text-[9px] text-emerald-500 font-mono mt-1">
+                  Model xG: {data.predicted_xg}
+                </div>
+             )}
+           </div>
+           
            {isLive ? (
              <div className="text-red-500 text-[10px] font-bold animate-pulse flex items-center gap-1">
                <span className="w-1.5 h-1.5 bg-red-500 rounded-full inline-block"></span>
@@ -156,7 +165,7 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
             isRisky={homeRisky} 
           />
           
-          {/* HOME SAFE (1X) - Only show if Risky or user wants Safe options */}
+          {/* HOME SAFE (1X) */}
           {homeRisky && dcHomeOdd > 0 && (
              <BettingRow 
                label="SAFE: 1X" 

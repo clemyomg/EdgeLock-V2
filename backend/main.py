@@ -86,11 +86,9 @@ def calculate_all_probabilities(league, home, away):
     db = league_stats[league]
     stats = db["stats"]
     
-    # 1. Exact Map
     home_mapped = NAME_MAP.get(home, home)
     away_mapped = NAME_MAP.get(away, away)
 
-    # 2. Fuzzy fallback
     if home_mapped not in stats:
         for k in stats.keys():
             if normalize_name(home) == normalize_name(k):
@@ -107,11 +105,12 @@ def calculate_all_probabilities(league, home, away):
         return None
 
     h, a = stats[home_mapped], stats[away_mapped]
+    
+    # ✅ CALCULATE PROJECTED XG
     xg_h = h['att_h'] * a['def_a'] * db['avg_h']
     xg_a = a['att_a'] * h['def_h'] * db['avg_a']
 
     prob_h, prob_d, prob_a = 0, 0, 0
-    prob_o15, prob_o25 = 0, 0
     
     for i in range(10):
         for j in range(10):
@@ -119,14 +118,12 @@ def calculate_all_probabilities(league, home, away):
             if i > j: prob_h += p
             elif i == j: prob_d += p
             else: prob_a += p
-            if (i+j) > 1.5: prob_o15 += p
-            if (i+j) > 2.5: prob_o25 += p
 
     return {
         "1": prob_h, "X": prob_d, "2": prob_a,
         "1X": prob_h + prob_d, "X2": prob_d + prob_a,
-        "O1.5": prob_o15, "U1.5": 1 - prob_o15,
-        "O2.5": prob_o25, "U2.5": 1 - prob_o25
+        "xg_h": xg_h, # ✅ SEND TO FRONTEND
+        "xg_a": xg_a  # ✅ SEND TO FRONTEND
     }
 
 @app.get("/live-edges")
@@ -160,11 +157,15 @@ def get_live_edges():
             probs = calculate_all_probabilities("Bundesliga", home_name, away_name)
             
             has_model = False
-            model_probs, fair_odds = {}, {}
+            model_probs, fair_odds, predicted_score = {}, {}, None
+            
             if probs:
                 has_model = True
-                model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
-                fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
+                model_probs = {k: round(v * 100, 1) for k, v in probs.items() if k in ["1","X","2","1X","X2"]}
+                fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items() if k in ["1","X","2","1X","X2"]}
+                
+                # ✅ Format Predicted Score
+                predicted_score = f"{probs['xg_h']:.2f} - {probs['xg_a']:.2f}"
 
             market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
             
@@ -205,6 +206,7 @@ def get_live_edges():
                 "has_model": has_model, 
                 "probs": model_probs,
                 "fair_odds": fair_odds,
+                "predicted_xg": predicted_score, # ✅ NEW FIELD
                 "market_odds": market_odds
             })
 
