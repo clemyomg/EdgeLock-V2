@@ -1,10 +1,8 @@
-# backend/models.py
-from sqlalchemy import Column, Integer, String, Float, DateTime, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, Boolean
 from database import Base
 
 class MatchPrediction(Base):
-    # 💥 Renaming this forces Railway to build a NEW table with all columns
-    __tablename__ = "predictions_v2"
+    __tablename__ = "predictions_v2" # Keeping same table to preserve your current data
 
     id = Column(Integer, primary_key=True, index=True)
     fixture_id = Column(Integer, unique=True, index=True) 
@@ -22,12 +20,14 @@ class MatchPrediction(Base):
     fair_odd_draw = Column(Float)
     fair_odd_away = Column(Float)
     
-    # LIVE REALITY (Updated in real-time)
-    status = Column(String)        # e.g., "FT", "1H"
-    minute = Column(Integer)       # e.g., 60
+    # LIVE REALITY
+    status = Column(String)        # "FT", "1H", "NS"
+    minute = Column(Integer)       # 90
     actual_home_goals = Column(Integer, nullable=True)
     actual_away_goals = Column(Integer, nullable=True)
     
-    # THE GOLD MINE 🏆
-    # Stores EVERYTHING: Events, Cards, Weather, Lineups
+    # ✅ NEW: The "Done" Flag
+    is_settled = Column(Boolean, default=False)
+
+    # THE GOLD MINE 🏆 (Stores everything: Weather, xG, Shots, Lineups)
     raw_data = Column(JSON, nullable=True)

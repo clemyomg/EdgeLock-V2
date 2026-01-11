@@ -15,7 +15,7 @@ from database import engine, get_db, Base
 from models import MatchPrediction
 from mappings import NAME_MAP
 
-# Create Tables automatically
+# Update Tables
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -24,7 +24,7 @@ app = FastAPI()
 FOOTBALL_API_KEY = "7bea55228c0e0fbd7de71e7f5ff3802f"
 LEAGUE_CONFIG = { "Bundesliga": 78 } 
 CURRENT_SEASON = 2025 
-CACHE_DURATION = 60 # Fast refresh for LIVE data
+CACHE_DURATION = 60 
 
 api_cache = { "last_updated": 0, "data": [] }
 league_stats = {}
@@ -45,7 +45,6 @@ def train_league_model(league_name):
     if not os.path.exists(folder_path): return None
 
     dfs = []
-    print(f"📂 Loading CSVs from {folder_path}...")
     for file in os.listdir(folder_path):
         if file.endswith(".csv"):
             try:
@@ -84,7 +83,7 @@ def train_league_model(league_name):
                 'def_a': np.average(ta['xGA'], weights=ta['weight']) / avg_h
             }
     
-    print(f"✅ LOADED TEAMS: {sorted(list(stats.keys()))}")
+    print(f"✅ LOADED TEAMS: {len(stats)}")
     return {"stats": stats, "avg_h": avg_h, "avg_a": avg_a}
 
 train_res = train_league_model("Bundesliga")
@@ -113,12 +112,10 @@ def calculate_all_probabilities(league, home, away):
     if home_mapped not in stats or away_mapped not in stats: return None
 
     h, a = stats[home_mapped], stats[away_mapped]
-    
     xg_h = h['att_h'] * a['def_a'] * db_stats['avg_h']
     xg_a = a['att_a'] * h['def_h'] * db_stats['avg_a']
 
     prob_h, prob_d, prob_a = 0, 0, 0
-    
     for i in range(10):
         for j in range(10):
             p = poisson.pmf(i, xg_h) * poisson.pmf(j, xg_a)
@@ -126,23 +123,63 @@ def calculate_all_probabilities(league, home, away):
             elif i == j: prob_d += p
             else: prob_a += p
 
-    return {
-        "1": prob_h, "X": prob_d, "2": prob_a,
-        "1X": prob_h + prob_d, "X2": prob_d + prob_a,
-        "xg_h": xg_h, 
-        "xg_a": xg_a
-    }
+    return {"1": prob_h, "X": prob_d, "2": prob_a, "1X": prob_h + prob_d, "X2": prob_d + prob_a, "xg_h": xg_h, "xg_a": xg_a}
 
-# --- 3. MAIN ENDPOINT ---
+# --- 3. THE SETTLEMENT ENGINE 🏆 ---
+def settle_finished_games(db: Session):
+    # Find 1 game that is finished (FT) but NOT settled
+    game_to_settle = db.query(MatchPrediction).filter(
+        MatchPrediction.status == "FT",
+        MatchPrediction.is_settled == False
+    ).first()
+
+    if not game_to_settle:
+        return # Nothing to do
+
+    print(f"⛏️ Mining Gold Data for: {game_to_settle.home_team} vs {game_to_settle.away_team}...")
+    
+    headers = {
+        "x-rapidapi-key": FOOTBALL_API_KEY,
+        "x-rapidapi-host": "v3.football.api-sports.io"
+    }
+    
+    fix_id = game_to_settle.fixture_id
+    gold_data = game_to_settle.raw_data or {}
+
+    try:
+        # 1. Fetch Statistics (xG, Shots, Corners)
+        stats_res = requests.get(f"https://v3.football.api-sports.io/fixtures/statistics?fixture={fix_id}", headers=headers).json()
+        gold_data["statistics"] = stats_res.get("response", [])
+
+        # 2. Fetch Events (Goals, Cards, Subs)
+        events_res = requests.get(f"https://v3.football.api-sports.io/fixtures/events?fixture={fix_id}", headers=headers).json()
+        gold_data["events"] = events_res.get("response", [])
+
+        # 3. Fetch Lineups (Players)
+        lineups_res = requests.get(f"https://v3.football.api-sports.io/fixtures/lineups?fixture={fix_id}", headers=headers).json()
+        gold_data["lineups"] = lineups_res.get("response", [])
+
+        # ✅ Save & Mark Settled
+        game_to_settle.raw_data = gold_data
+        game_to_settle.is_settled = True
+        db.commit()
+        print(f"✅ Data Captured & Settled!")
+
+    except Exception as e:
+        print(f"❌ Settlement Failed: {e}")
+
+# --- 4. MAIN ENDPOINT ---
 @app.get("/live-edges")
 def get_live_edges(db: Session = Depends(get_db)):
+    # ⛏️ Run the miner first (Opportunistic Settlement)
+    settle_finished_games(db)
+
     current_time = time.time()
     
     if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]:
         return api_cache["data"]
 
-    print(f"🚀 Fetching Live & Upcoming Data (Saving Gold)...")
-    
+    print(f"🚀 Fetching Live & Upcoming Data...")
     headers = {
         "x-rapidapi-key": FOOTBALL_API_KEY,
         "x-rapidapi-host": "v3.football.api-sports.io"
@@ -151,43 +188,27 @@ def get_live_edges(db: Session = Depends(get_db)):
     combined_fixtures = []
     seen_ids = set()
 
-    # 1️⃣ FETCH LIVE GAMES
-    try:
-        url_live = f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&live=all"
-        res_live = requests.get(url_live, headers=headers)
-        if res_live.status_code == 200:
-            live_games = res_live.json().get("response", [])
-            for g in live_games:
-                if g["fixture"]["id"] not in seen_ids:
-                    combined_fixtures.append(g)
-                    seen_ids.add(g["fixture"]["id"])
-            print(f"⚡ Found {len(live_games)} LIVE matches.")
-    except Exception as e: print(f"⚠️ Live Fetch Error: {e}")
+    # Fetch Live & Next
+    for endpoint in ["live=all", "next=30"]:
+        try:
+            res = requests.get(f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&{endpoint}", headers=headers)
+            if res.status_code == 200:
+                games = res.json().get("response", [])
+                for g in games:
+                    if g["fixture"]["id"] not in seen_ids:
+                        combined_fixtures.append(g)
+                        seen_ids.add(g["fixture"]["id"])
+        except: pass
 
-    # 2️⃣ FETCH UPCOMING GAMES
-    try:
-        url_next = f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&next=30"
-        res_next = requests.get(url_next, headers=headers)
-        if res_next.status_code == 200:
-            next_games = res_next.json().get("response", [])
-            for g in next_games:
-                if g["fixture"]["id"] not in seen_ids:
-                    combined_fixtures.append(g)
-                    seen_ids.add(g["fixture"]["id"])
-            print(f"📅 Found {len(next_games)} upcoming matches.")
-    except Exception as e: print(f"⚠️ Upcoming Fetch Error: {e}")
-
-    # --- PROCESS ALL ---
     final_results = []
     
     for f in combined_fixtures:
         try:
             fix_id = f["fixture"]["id"]
-            home_name = f["teams"]["home"]["name"]
-            away_name = f["teams"]["away"]["name"]
+            home = f["teams"]["home"]["name"]
+            away = f["teams"]["away"]["name"]
             
-            # --- MODEL PREDICTION ---
-            probs = calculate_all_probabilities("Bundesliga", home_name, away_name)
+            probs = calculate_all_probabilities("Bundesliga", home, away)
             
             has_model = False
             model_probs, fair_odds, predicted_score = {}, {}, None
@@ -198,57 +219,41 @@ def get_live_edges(db: Session = Depends(get_db)):
                 fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items() if k in ["1","X","2","1X","X2"]}
                 predicted_score = f"{probs['xg_h']:.2f} - {probs['xg_a']:.2f}"
 
-                # 💾 SAVE/UPDATE DATABASE
-                existing_pred = db.query(MatchPrediction).filter(MatchPrediction.fixture_id == fix_id).first()
+                # 💾 DATABASE SYNC
+                existing = db.query(MatchPrediction).filter(MatchPrediction.fixture_id == fix_id).first()
                 
-                # Extract Live Data
-                current_status = f["fixture"]["status"]["short"]
-                current_time_min = f["fixture"]["status"]["elapsed"]
-                goals_h = f["goals"]["home"]
-                goals_a = f["goals"]["away"]
-
-                if not existing_pred:
-                    # Create New
-                    new_pred = MatchPrediction(
-                        fixture_id=fix_id,
-                        home_team=home_name,
-                        away_team=away_name,
-                        league="Bundesliga",
+                status = f["fixture"]["status"]["short"]
+                
+                if not existing:
+                    new_rec = MatchPrediction(
+                        fixture_id=fix_id, home_team=home, away_team=away, league="Bundesliga",
                         match_date=f["fixture"]["date"],
-                        model_home_xg=float(probs['xg_h']),
-                        model_away_xg=float(probs['xg_a']),
-                        fair_odd_home=float(fair_odds.get("1", 0)),
-                        fair_odd_draw=float(fair_odds.get("X", 0)),
-                        fair_odd_away=float(fair_odds.get("2", 0)),
-                        # Live Updates
-                        status=current_status,
-                        minute=current_time_min,
-                        actual_home_goals=goals_h,
-                        actual_away_goals=goals_a,
-                        raw_data=f 
+                        model_home_xg=float(probs['xg_h']), model_away_xg=float(probs['xg_a']),
+                        fair_odd_home=float(fair_odds.get("1", 0)), fair_odd_draw=float(fair_odds.get("X", 0)), fair_odd_away=float(fair_odds.get("2", 0)),
+                        status=status, minute=f["fixture"]["status"]["elapsed"],
+                        actual_home_goals=f["goals"]["home"], actual_away_goals=f["goals"]["away"],
+                        raw_data=f # Initial raw data (basic)
                     )
-                    db.add(new_pred)
+                    db.add(new_rec)
                     db.commit()
                 else:
-                    # Update Existing
-                    existing_pred.status = current_status
-                    existing_pred.minute = current_time_min
-                    existing_pred.actual_home_goals = goals_h
-                    existing_pred.actual_away_goals = goals_a
-                    existing_pred.raw_data = f 
-                    existing_pred.model_home_xg = float(probs['xg_h'])
-                    existing_pred.model_away_xg = float(probs['xg_a'])
+                    # Update Live Status
+                    existing.status = status
+                    existing.minute = f["fixture"]["status"]["elapsed"]
+                    existing.actual_home_goals = f["goals"]["home"]
+                    existing.actual_away_goals = f["goals"]["away"]
+                    # Don't overwrite raw_data if we already mined gold (settled)
+                    if not existing.is_settled:
+                        existing.raw_data = f
                     db.commit()
 
-            # --- ODDS FETCHING ---
+            # Odds
             market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0 }
-            url_odds = f"https://v3.football.api-sports.io/odds?fixture={fix_id}"
-            res_odds = requests.get(url_odds, headers=headers).json()
-            
+            res_odds = requests.get(f"https://v3.football.api-sports.io/odds?fixture={fix_id}", headers=headers).json()
             if res_odds.get("response"):
-                all_bookies = res_odds["response"][0]["bookmakers"]
-                for bookie in all_bookies:
-                    if market_odds["1"] > 0: break 
+                bookies = res_odds["response"][0]["bookmakers"]
+                bookie = next((b for b in bookies if b["id"] == 1), bookies[0] if bookies else None)
+                if bookie:
                     for bet in bookie["bets"]:
                         if bet["id"] == 1:
                              for v in bet["values"]:
@@ -263,15 +268,15 @@ def get_live_edges(db: Session = Depends(get_db)):
             final_results.append({
                 "id": fix_id,
                 "date": f["fixture"]["date"],
-                "match": f"{home_name} vs {away_name}",
-                "home_team": home_name,  # 👈 RE-ADDED THIS
-                "away_team": away_name,  # 👈 RE-ADDED THIS
+                "match": f"{home} vs {away}",
+                "home_team": home,
+                "away_team": away,
                 "league": "Bundesliga",
                 "round": f["league"]["round"],
                 "score": {
                     "status": f["fixture"]["status"]["short"], 
                     "time": f["fixture"]["status"]["elapsed"], 
-                    "goals_h": f["goals"]["home"],
+                    "goals_h": f["goals"]["home"], 
                     "goals_a": f["goals"]["away"]
                 },
                 "has_model": has_model, 
@@ -280,8 +285,7 @@ def get_live_edges(db: Session = Depends(get_db)):
                 "predicted_xg": predicted_score,
                 "market_odds": market_odds
             })
-        except Exception as e:
-            print(f"❌ Error fixture {f.get('fixture',{}).get('id')}: {e}")
+        except Exception as e: print(f"❌ Error {f.get('fixture',{}).get('id')}: {e}")
 
     final_results.sort(key=lambda x: x['date'])
     api_cache["data"] = final_results
