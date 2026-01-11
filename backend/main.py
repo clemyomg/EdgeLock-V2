@@ -5,10 +5,17 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, date
 from scipy.stats import poisson
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 
+# ✅ Import Database tools
+from database import engine, get_db, Base
+from models import MatchPrediction
 from mappings import NAME_MAP
+
+# Create Tables automatically (if they don't exist)
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
@@ -18,8 +25,8 @@ LEAGUE_CONFIG = { "Bundesliga": 78 }
 CURRENT_SEASON = 2025 
 CACHE_DURATION = 600 
 
-league_stats = {} 
 api_cache = { "last_updated": 0, "data": [] }
+league_stats = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,6 +38,7 @@ app.add_middleware(
 def normalize_name(name):
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
+# --- 1. TRAINING (Unchanged) ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
     if not os.path.exists(folder_path): return None
@@ -74,21 +82,23 @@ def train_league_model(league_name):
                 'att_a': np.average(ta[metric], weights=ta['weight']) / avg_a,
                 'def_a': np.average(ta['xGA'], weights=ta['weight']) / avg_h
             }
-            
+    
     print(f"✅ LOADED TEAMS: {sorted(list(stats.keys()))}")
     return {"stats": stats, "avg_h": avg_h, "avg_a": avg_a}
 
 train_res = train_league_model("Bundesliga")
 if train_res: league_stats["Bundesliga"] = train_res
 
+# --- 2. MATH & PROBABILITIES ---
 def calculate_all_probabilities(league, home, away):
     if league not in league_stats: return None
-    db = league_stats[league]
-    stats = db["stats"]
+    db_stats = league_stats[league]
+    stats = db_stats["stats"]
     
     home_mapped = NAME_MAP.get(home, home)
     away_mapped = NAME_MAP.get(away, away)
 
+    # Fuzzy Fallback
     if home_mapped not in stats:
         for k in stats.keys():
             if normalize_name(home) == normalize_name(k):
@@ -100,15 +110,12 @@ def calculate_all_probabilities(league, home, away):
                 away_mapped = k
                 break
 
-    if home_mapped not in stats or away_mapped not in stats: 
-        print(f"❌ MISMATCH: {home}->{home_mapped} vs {away}->{away_mapped}")
-        return None
+    if home_mapped not in stats or away_mapped not in stats: return None
 
     h, a = stats[home_mapped], stats[away_mapped]
     
-    # ✅ CALCULATE PROJECTED XG
-    xg_h = h['att_h'] * a['def_a'] * db['avg_h']
-    xg_a = a['att_a'] * h['def_h'] * db['avg_a']
+    xg_h = h['att_h'] * a['def_a'] * db_stats['avg_h']
+    xg_a = a['att_a'] * h['def_h'] * db_stats['avg_a']
 
     prob_h, prob_d, prob_a = 0, 0, 0
     
@@ -122,18 +129,19 @@ def calculate_all_probabilities(league, home, away):
     return {
         "1": prob_h, "X": prob_d, "2": prob_a,
         "1X": prob_h + prob_d, "X2": prob_d + prob_a,
-        "xg_h": xg_h, # ✅ SEND TO FRONTEND
-        "xg_a": xg_a  # ✅ SEND TO FRONTEND
+        "xg_h": xg_h, 
+        "xg_a": xg_a
     }
 
+# --- 3. MAIN ENDPOINT (Now with DB Saving) ---
 @app.get("/live-edges")
-def get_live_edges():
+def get_live_edges(db: Session = Depends(get_db)):
     current_time = time.time()
     
     if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]:
         return api_cache["data"]
 
-    print(f"🚀 Fetching Data...")
+    print(f"🚀 Fetching Data & Saving to DB...")
     final_results = []
     
     headers = {
@@ -163,9 +171,33 @@ def get_live_edges():
                 has_model = True
                 model_probs = {k: round(v * 100, 1) for k, v in probs.items() if k in ["1","X","2","1X","X2"]}
                 fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items() if k in ["1","X","2","1X","X2"]}
-                
-                # ✅ Format Predicted Score
                 predicted_score = f"{probs['xg_h']:.2f} - {probs['xg_a']:.2f}"
+
+                # 💾 SAVE TO DATABASE ("The Ledger")
+                existing_pred = db.query(MatchPrediction).filter(MatchPrediction.fixture_id == fix_id).first()
+                
+                if not existing_pred:
+                    # Create new record
+                    new_pred = MatchPrediction(
+                        fixture_id=fix_id,
+                        home_team=home_name,
+                        away_team=away_name,
+                        league="Bundesliga",
+                        match_date=f["fixture"]["date"],
+                        model_home_xg=probs['xg_h'],
+                        model_away_xg=probs['xg_a'],
+                        fair_odd_home=fair_odds.get("1", 0),
+                        fair_odd_draw=fair_odds.get("X", 0),
+                        fair_odd_away=fair_odds.get("2", 0)
+                    )
+                    db.add(new_pred)
+                    db.commit()
+                    print(f"✅ Booked: {home_name} vs {away_name}")
+                else:
+                    # Update existing (if model changed)
+                    existing_pred.model_home_xg = probs['xg_h']
+                    existing_pred.model_away_xg = probs['xg_a']
+                    db.commit()
 
             market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
             
@@ -206,7 +238,7 @@ def get_live_edges():
                 "has_model": has_model, 
                 "probs": model_probs,
                 "fair_odds": fair_odds,
-                "predicted_xg": predicted_score, # ✅ NEW FIELD
+                "predicted_xg": predicted_score,
                 "market_odds": market_odds
             })
 
