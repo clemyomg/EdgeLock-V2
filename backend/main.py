@@ -14,22 +14,18 @@ from mappings import NAME_MAP
 app = FastAPI()
 
 # --- CONFIG ---
-ODDS_API_KEY = "9a605006b43a0074c7c7484f2978ed5b"
 FOOTBALL_API_KEY = "7bea55228c0e0fbd7de71e7f5ff3802f"
-
-# Limits & Caching
-ODDS_CACHE_DURATION = 1800  # 30 mins
-SCORES_CACHE_DURATION = 60  # 60 seconds
-
-LEAGUE_CONFIG = { "Bundesliga": "soccer_germany_bundesliga" }
-FOOTBALL_LEAGUE_ID = 78 
+LEAGUE_CONFIG = { "Bundesliga": 78 } # Bundesliga ID
 CURRENT_SEASON = 2024
+
+# Caching (Updates every 10 mins since you have Pro plan)
+CACHE_DURATION = 600 
 
 # --- MEMORY ---
 league_stats = {} 
 api_cache = { 
-    "odds": {"last_updated": 0, "data": []},
-    "scores": {"last_updated": 0, "data": []} 
+    "last_updated": 0, 
+    "data": [] 
 }
 
 app.add_middleware(
@@ -43,7 +39,7 @@ app.add_middleware(
 def normalize_name(name):
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
-# --- 1. TRAINING LOGIC ---
+# --- 1. TRAINING LOGIC (Unchanged) ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
     if not os.path.exists(folder_path): return None
@@ -60,7 +56,6 @@ def train_league_model(league_name):
     full_df = pd.concat(dfs)
     df = full_df[full_df['Result'].notna()].copy()
     
-    # Time Decay
     df['DateObj'] = pd.to_datetime(df['Date'], errors='coerce')
     latest = df['DateObj'].max()
     df['weight'] = np.exp(-0.0025 * (latest - df['DateObj']).dt.days)
@@ -88,9 +83,9 @@ def train_league_model(league_name):
             
     return {"stats": stats, "avg_h": avg_h, "avg_a": avg_a}
 
-for league in LEAGUE_CONFIG:
-    res = train_league_model(league)
-    if res: league_stats[league] = res
+# Train on Startup
+train_res = train_league_model("Bundesliga")
+if train_res: league_stats["Bundesliga"] = train_res
 
 # --- 2. MATH ENGINE ---
 def calculate_all_probabilities(league, home, away):
@@ -98,8 +93,21 @@ def calculate_all_probabilities(league, home, away):
     db = league_stats[league]
     stats = db["stats"]
     
+    # Map API-Football Name -> CSV Name
     home_mapped = NAME_MAP.get(home, home)
     away_mapped = NAME_MAP.get(away, away)
+
+    # Smart fallback: Try normalize if map fails
+    if home_mapped not in stats:
+        for k in stats.keys():
+            if normalize_name(home) in normalize_name(k):
+                home_mapped = k
+                break
+    if away_mapped not in stats:
+        for k in stats.keys():
+            if normalize_name(away) in normalize_name(k):
+                away_mapped = k
+                break
 
     if home_mapped not in stats or away_mapped not in stats: return None
 
@@ -126,158 +134,111 @@ def calculate_all_probabilities(league, home, away):
         "O2.5": prob_o25, "U2.5": 1 - prob_o25
     }
 
-# --- 3. LIVE SCORES FETCHER ---
-def get_football_api_data():
+# --- 3. API-FOOTBALL ENGINE (NEW) ---
+@app.get("/live-edges")
+def get_live_edges():
     current_time = time.time()
     
-    if current_time - api_cache["scores"]["last_updated"] < SCORES_CACHE_DURATION:
-        return api_cache["scores"]["data"]
+    # Cache Check
+    if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]:
+        return api_cache["data"]
+
+    print("🚀 Fetching Fresh Data from API-Football (Pro Plan)...")
     
-    today_str = date.today().strftime("%Y-%m-%d")
-    url = f"https://v3.football.api-sports.io/fixtures?league={FOOTBALL_LEAGUE_ID}&season={CURRENT_SEASON}&date={today_str}"
+    final_results = []
     
     headers = {
         "x-rapidapi-key": FOOTBALL_API_KEY,
         "x-rapidapi-host": "v3.football.api-sports.io"
     }
-    
+
+    # 1. Fetch Next 30 Fixtures (Bundesliga)
+    url_fixtures = f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&next=30"
     try:
-        res = requests.get(url, headers=headers).json()
-        fixtures = res.get("response", [])
+        res_fix = requests.get(url_fixtures, headers=headers).json()
+        fixtures = res_fix.get("response", [])
         
-        simplified = []
         for f in fixtures:
-            simplified.append({
-                "home": f["teams"]["home"]["name"],
-                "away": f["teams"]["away"]["name"],
-                "status_short": f["fixture"]["status"]["short"], 
-                "elapsed": f["fixture"]["status"]["elapsed"],
-                "goals_h": f["goals"]["home"],
-                "goals_a": f["goals"]["away"],
-                "round": f["league"]["round"]
-            })
+            fix_id = f["fixture"]["id"]
+            home_name = f["teams"]["home"]["name"]
+            away_name = f["teams"]["away"]["name"]
             
-        api_cache["scores"]["data"] = simplified
-        api_cache["scores"]["last_updated"] = current_time
-        return simplified
-        
-    except Exception as e:
-        print(f"Football API Error: {e}")
-        return []
-
-# --- 4. MAIN ENDPOINT ---
-@app.get("/live-edges")
-def get_live_edges():
-    current_time = time.time()
-    
-    odds_data = []
-    print("🔄 Fetching New Odds...")
-    for league, key in LEAGUE_CONFIG.items():
-        try:
-            # 1. Attempt to fetch FULL markets
-            url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,doublechance,spreads&oddsFormat=decimal"
-            res = requests.get(url).json()
+            # 2. CALCULATE PROBABILITIES
+            probs = calculate_all_probabilities("Bundesliga", home_name, away_name)
             
-            # 2. Fallback to basic
-            if not isinstance(res, list):
-                print(f"⚠️ Complex Fetch Failed: {res}. Retrying with Basic...")
-                url = f"https://api.the-odds-api.com/v4/sports/{key}/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal"
-                res = requests.get(url).json()
-                if not isinstance(res, list): continue 
+            has_model = False
+            model_probs, fair_odds = {}, {}
+            if probs:
+                has_model = True
+                model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
+                fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
 
-            for game in res:
-                home, away = game['home_team'], game['away_team']
-                probs = calculate_all_probabilities(league, home, away)
-                
-                has_model = False
-                model_probs, fair_odds = {}, {}
-                
-                if probs:
-                    has_model = True
-                    model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
-                    fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
-
-                market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
-                bookie = next((b for b in game['bookmakers'] if 'unibet' in b['key'] or 'betfair' in b['key']), game['bookmakers'][0] if game['bookmakers'] else None)
+            # 3. FETCH ODDS FOR THIS GAME
+            # Pro Plan allows this! (1 call per game)
+            market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
+            
+            url_odds = f"https://v3.football.api-sports.io/odds?fixture={fix_id}"
+            res_odds = requests.get(url_odds, headers=headers).json()
+            
+            if res_odds.get("response"):
+                # Usually many bookmakers, pick the first reliable one (e.g. Bet365 ID=1 or Bwin ID=6)
+                bookmakers = res_odds["response"][0]["bookmakers"]
+                bookie = next((b for b in bookmakers if b["id"] == 1), bookmakers[0] if bookmakers else None)
                 
                 if bookie:
-                    # 1X2
-                    h2h = next((m for m in bookie['markets'] if m['key'] == 'h2h'), None)
-                    if h2h:
-                        for o in h2h['outcomes']:
-                            if o['name'] == home: market_odds["1"] = o['price']
-                            elif o['name'] == away: market_odds["2"] = o['price']
-                            elif o['name'] == 'Draw': market_odds["X"] = o['price']
-                    
-                    # ✅ IMPROVED DOUBLE CHANCE (Smart Fuzzy Match)
-                    dc = next((m for m in bookie['markets'] if m['key'] == 'doublechance'), None)
-                    if dc:
-                        for o in dc['outcomes']:
-                            name = o['name'].lower()
-                            # Try exact match first
-                            if (home.lower() in name and "draw" in name): market_odds["1X"] = o['price']
-                            elif (away.lower() in name and "draw" in name): market_odds["X2"] = o['price']
-                            # If that fails, try First Word match (e.g. "Man" matches "Man Utd")
-                            else:
-                                h_part = home.lower().split(' ')[0]
-                                a_part = away.lower().split(' ')[0]
-                                if (h_part in name and "draw" in name): market_odds["1X"] = o['price']
-                                if (a_part in name and "draw" in name): market_odds["X2"] = o['price']
+                    for bet in bookie["bets"]:
+                        # 1X2 (ID: 1)
+                        if bet["id"] == 1:
+                            for v in bet["values"]:
+                                if v["value"] == "Home": market_odds["1"] = float(v["odd"])
+                                if v["value"] == "Away": market_odds["2"] = float(v["odd"])
+                                if v["value"] == "Draw": market_odds["X"] = float(v["odd"])
+                        
+                        # Double Chance (ID: 12)
+                        if bet["id"] == 12:
+                            for v in bet["values"]:
+                                if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
+                                if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
 
-                    # ✅ IMPROVED SPREADS (Smart Fuzzy Match)
-                    spreads = next((m for m in bookie['markets'] if m['key'] == 'spreads'), None)
-                    if spreads:
-                        for o in spreads['outcomes']:
-                            name = o['name'].lower()
-                            h_part = home.lower().split(' ')[0]
-                            a_part = away.lower().split(' ')[0]
-                            
-                            if name == home.lower() or h_part in name: 
-                                market_odds["H_Spread"] = o['price']
-                                market_odds["H_Spread_Point"] = o['point']
-                            elif name == away.lower() or a_part in name: 
-                                market_odds["A_Spread"] = o['price']
-                                market_odds["A_Spread_Point"] = o['point']
+                        # Asian Handicap (ID: 4) or Handicap (ID: 3)
+                        # We look for a small handicap to act as 'Safer Option'
+                        if bet["id"] == 4:
+                            # Just grabbing the first main line for now
+                            for v in bet["values"]:
+                                if v["value"] == "Home": 
+                                    market_odds["H_Spread"] = float(v["odd"])
+                                    # API Football sends "Home" but handicap is usually in separate field or string, 
+                                    # For Asian, value might be "Home" and "handicap" field exists?
+                                    # API-Football structure for handicap is weird. Often value is "Home" and there is a "handicap" key?
+                                    # Actually, let's stick to Double Chance as primary. 
+                                    pass
 
-                odds_data.append({
-                    "id": game['id'],
-                    "date": game['commence_time'],
-                    "match": f"{home} vs {away}",
-                    "home_team": home, 
-                    "away_team": away,
-                    "league": league,
-                    "has_model": has_model, 
-                    "probs": model_probs,
-                    "fair_odds": fair_odds,
-                    "market_odds": market_odds
-                })
-            
-            api_cache["odds"]["data"] = odds_data
-            api_cache["odds"]["last_updated"] = current_time
+            final_results.append({
+                "id": fix_id,
+                "date": f["fixture"]["date"],
+                "match": f"{home_name} vs {away_name}",
+                "home_team": home_name, 
+                "away_team": away_name,
+                "league": "Bundesliga",
+                "round": f["league"]["round"],
+                "score": {
+                    "status": f["fixture"]["status"]["short"],
+                    "time": f["fixture"]["status"]["elapsed"],
+                    "goals_h": f["goals"]["home"],
+                    "goals_a": f["goals"]["away"]
+                },
+                "has_model": has_model, 
+                "probs": model_probs,
+                "fair_odds": fair_odds,
+                "market_odds": market_odds
+            })
 
-        except Exception as e: print(f"❌ Odds API Error: {e}")
+    except Exception as e:
+        print(f"❌ API Error: {e}")
 
-    live_scores = get_football_api_data()
-    final_results = []
-    
-    for game in odds_data:
-        game["score"] = None
-        game["round"] = None
-        h_home = game["home_team"].split()[0].lower()
-        
-        for score in live_scores:
-            s_home = score["home"].split()[0].lower()
-            if h_home in s_home or s_home in h_home:
-                game["score"] = {
-                    "status": score["status_short"], 
-                    "time": score["elapsed"],
-                    "goals_h": score["goals_h"],
-                    "goals_a": score["goals_a"]
-                }
-                game["round"] = score["round"]
-                break
-        
-        final_results.append(game)
-
+    # Sort by Date
     final_results.sort(key=lambda x: x['date'])
+    
+    api_cache["data"] = final_results
+    api_cache["last_updated"] = current_time
     return final_results

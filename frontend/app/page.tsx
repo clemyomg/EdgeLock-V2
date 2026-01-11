@@ -28,7 +28,7 @@ export default function EdgeLockPro() {
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 60000);
+    const interval = setInterval(fetchData, 60000); // 1 min refresh
     return () => clearInterval(interval);
   }, []);
 
@@ -47,21 +47,19 @@ export default function EdgeLockPro() {
     return acc;
   }, {});
 
-  if (loading) return <div className="min-h-screen bg-zinc-950 flex items-center justify-center text-emerald-500 font-mono animate-pulse">Scanning Markets...</div>;
+  if (loading) return <div className="min-h-screen bg-zinc-950 flex items-center justify-center text-emerald-500 font-mono animate-pulse">Scanning Bundesliga...</div>;
   if (error) return <div className="min-h-screen bg-zinc-950 flex items-center justify-center text-red-500">Connection Failed: {error}</div>;
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white p-4 font-sans pb-24">
-      {/* HEADER & BANKROLL */}
       <div className="flex flex-col gap-4 mb-6">
         <div className="flex justify-between items-center">
           <h1 className="text-2xl font-bold text-emerald-400 tracking-tighter">EdgeLock<span className="text-white">Pro</span></h1>
           <div className="text-[10px] bg-zinc-900 border border-zinc-800 px-3 py-1 rounded-full text-zinc-400">
-            {matches.length} Games
+            {matches.length} Fixtures
           </div>
         </div>
         
-        {/* BANKROLL INPUT */}
         <div className="bg-zinc-900/50 p-3 rounded-lg border border-zinc-800 flex justify-between items-center shadow-lg">
           <label className="text-xs text-zinc-500 uppercase font-bold tracking-wider">Bankroll (€)</label>
           <input 
@@ -75,9 +73,9 @@ export default function EdgeLockPro() {
 
       {matches.length === 0 ? (
         <div className="flex flex-col items-center justify-center mt-20 text-zinc-600">
-          <div className="text-4xl mb-2">🔭</div>
-          <div>No matches found right now.</div>
-          <div className="text-xs mt-1">Check back later for new odds.</div>
+          <div className="text-4xl mb-2">⚽</div>
+          <div>No Bundesliga fixtures found.</div>
+          <div className="text-xs mt-1">Check back later.</div>
         </div>
       ) : (
         <div className="grid gap-8">
@@ -101,36 +99,31 @@ export default function EdgeLockPro() {
 
 function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
   const time = new Date(data.date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-  const isLive = data.score && (data.score.status === "1H" || data.score.status === "2H" || data.score.status === "HT");
+  const isLive = ["1H", "2H", "HT", "ET", "P"].includes(data.score.status);
   const roundDisplay = data.round ? data.round.replace("Regular Season - ", "MD ") : "";
 
   // ODDS LOGIC
   const homeOdd = data.market_odds["1"] || 0;
   const awayOdd = data.market_odds["2"] || 0;
   
-  // Risk Detection (Win odd > 2.50 is considered risky)
+  // Risk (Orange if > 2.50)
   const homeRisky = homeOdd > 2.5;
   const awayRisky = awayOdd > 2.5;
 
-  // Double Chance / Handicap Logic
   const dcHomeOdd = data.market_odds["1X"] || 0;
   const dcAwayOdd = data.market_odds["X2"] || 0;
-  
-  // Show handicap if DC is risky OR if DC is missing (0)
-  const showHomeHandicap = (dcHomeOdd > 2.5 || dcHomeOdd === 0);
-  const showAwayHandicap = (dcAwayOdd > 2.5 || dcAwayOdd === 0);
 
   return (
     <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden shadow-sm hover:border-zinc-700 transition-colors relative">
       
-      {/* HEADER: STACKED TEAMS */}
+      {/* HEADER */}
       <div className="p-4 pb-2 border-b border-zinc-900/50">
         <div className="flex justify-between items-center mb-3">
            <div className="text-[9px] text-zinc-600 uppercase tracking-widest font-bold">{data.league} <span className="text-zinc-700 font-normal">| {roundDisplay}</span></div>
            {isLive ? (
              <div className="text-red-500 text-[10px] font-bold animate-pulse flex items-center gap-1">
                <span className="w-1.5 h-1.5 bg-red-500 rounded-full inline-block"></span>
-               {data.score.elapsed}'
+               {data.score.time}'
              </div>
            ) : (
              <div className="text-[10px] font-mono text-zinc-500 bg-zinc-900 px-1.5 py-0.5 rounded">{time}</div>
@@ -163,23 +156,14 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
             isRisky={homeRisky} 
           />
           
-          {/* HOME SAFER OPTION */}
-          {homeRisky && (
-             !showHomeHandicap ? (
-               <BettingRow 
-                 label="SAFE: 1X" 
-                 prob={data.probs["1X"]} fair={data.fair_odds["1X"]} market={dcHomeOdd} 
-                 bankroll={bankroll} 
-                 highlight={true} 
-               />
-             ) : (
-               <BettingRow 
-                 label={`SAFE: 1 (${data.market_odds["H_Spread_Point"] > 0 ? "+" : ""}${data.market_odds["H_Spread_Point"]})`} 
-                 prob={data.probs["1X"]} fair={data.fair_odds["1X"]} market={data.market_odds["H_Spread"]} 
-                 bankroll={bankroll} 
-                 highlight={true} 
-               />
-             )
+          {/* HOME SAFE (1X) - Only show if Risky or user wants Safe options */}
+          {homeRisky && dcHomeOdd > 0 && (
+             <BettingRow 
+               label="SAFE: 1X" 
+               prob={data.probs["1X"]} fair={data.fair_odds["1X"]} market={dcHomeOdd} 
+               bankroll={bankroll} 
+               highlight={true} 
+             />
           )}
 
           <div className="h-px bg-zinc-900/50 my-1"></div>
@@ -192,23 +176,14 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
             isRisky={awayRisky} 
           />
 
-          {/* AWAY SAFER OPTION */}
-          {awayRisky && (
-             !showAwayHandicap ? (
-               <BettingRow 
-                 label="SAFE: X2" 
-                 prob={data.probs["X2"]} fair={data.fair_odds["X2"]} market={dcAwayOdd} 
-                 bankroll={bankroll} 
-                 highlight={true} 
-               />
-             ) : (
-               <BettingRow 
-                 label={`SAFE: 2 (${data.market_odds["A_Spread_Point"] > 0 ? "+" : ""}${data.market_odds["A_Spread_Point"]})`} 
-                 prob={data.probs["X2"]} fair={data.fair_odds["X2"]} market={data.market_odds["A_Spread"]} 
-                 bankroll={bankroll} 
-                 highlight={true} 
-               />
-             )
+          {/* AWAY SAFE (X2) */}
+          {awayRisky && dcAwayOdd > 0 && (
+             <BettingRow 
+               label="SAFE: X2" 
+               prob={data.probs["X2"]} fair={data.fair_odds["X2"]} market={dcAwayOdd} 
+               bankroll={bankroll} 
+               highlight={true} 
+             />
           )}
 
         </div>
@@ -222,8 +197,6 @@ function BettingRow({ label, prob, fair, market, bankroll, highlight, isRisky }:
   useEffect(() => { if (market > 0) setUserOdds(market); }, [market]);
 
   const edge = userOdds > 0 ? ((prob / 100) * userOdds) - 1 : 0;
-  
-  // Kelly Criterion
   const kellyFraction = edge > 0 ? (((userOdds - 1) * (prob/100) - (1 - (prob/100))) / (userOdds - 1)) * 0.25 : 0;
   const betAmount = kellyFraction * bankroll;
 
@@ -231,16 +204,18 @@ function BettingRow({ label, prob, fair, market, bankroll, highlight, isRisky }:
     <div className={`grid grid-cols-12 gap-2 items-center mb-1 p-2 rounded transition-all ${highlight ? "bg-emerald-900/10 border border-emerald-500/20" : "hover:bg-zinc-900/40 border border-transparent"}`}>
       
       {/* Label */}
-      <div className="col-span-5 flex flex-col justify-center leading-tight">
+      <div className="col-span-4 flex flex-col justify-center leading-tight">
         <div className={`text-xs font-bold ${highlight ? "text-emerald-400" : isRisky ? "text-orange-400" : "text-zinc-300"}`}>
           {label}
         </div>
       </div>
       
-      {/* Fair Odds */}
-      <div className="col-span-2 flex flex-col items-center">
+      {/* Fair Odds + Probability */}
+      <div className="col-span-3 flex flex-col items-center">
         <div className="text-[8px] text-zinc-600 uppercase">Fair</div>
-        <div className="text-xs font-bold text-zinc-400">{fair?.toFixed(2)}</div>
+        <div className="text-xs font-bold text-zinc-400">
+           {fair?.toFixed(2)} <span className="text-[9px] text-zinc-600 font-normal">({prob?.toFixed(0)}%)</span>
+        </div>
       </div>
 
       {/* User Input */}
