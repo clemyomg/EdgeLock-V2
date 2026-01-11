@@ -16,7 +16,7 @@ app = FastAPI()
 # --- CONFIG ---
 FOOTBALL_API_KEY = "7bea55228c0e0fbd7de71e7f5ff3802f"
 LEAGUE_CONFIG = { "Bundesliga": 78 } # Bundesliga ID
-CURRENT_SEASON = 2024
+CURRENT_SEASON = 2025 # ✅ UPDATED TO 2025 (For 2025-2026 Season)
 
 # Caching (Updates every 10 mins since you have Pro plan)
 CACHE_DURATION = 600 
@@ -39,10 +39,12 @@ app.add_middleware(
 def normalize_name(name):
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
-# --- 1. TRAINING LOGIC (Unchanged) ---
+# --- 1. TRAINING LOGIC ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
-    if not os.path.exists(folder_path): return None
+    if not os.path.exists(folder_path): 
+        print(f"⚠️ Warning: Data folder not found: {folder_path}")
+        return None
 
     dfs = []
     for file in os.listdir(folder_path):
@@ -51,7 +53,9 @@ def train_league_model(league_name):
                 dfs.append(pd.read_csv(os.path.join(folder_path, file)))
             except: pass
     
-    if not dfs: return None
+    if not dfs: 
+        print(f"⚠️ Warning: No CSV files found in {folder_path}")
+        return None
     
     full_df = pd.concat(dfs)
     df = full_df[full_df['Result'].notna()].copy()
@@ -80,7 +84,8 @@ def train_league_model(league_name):
                 'att_a': np.average(ta[metric], weights=ta['weight']) / avg_a,
                 'def_a': np.average(ta['xGA'], weights=ta['weight']) / avg_h
             }
-            
+    
+    print(f"✅ Trained Model for {league_name}: {len(stats)} teams loaded.")
     return {"stats": stats, "avg_h": avg_h, "avg_a": avg_a}
 
 # Train on Startup
@@ -134,16 +139,17 @@ def calculate_all_probabilities(league, home, away):
         "O2.5": prob_o25, "U2.5": 1 - prob_o25
     }
 
-# --- 3. API-FOOTBALL ENGINE (NEW) ---
+# --- 3. API-FOOTBALL ENGINE ---
 @app.get("/live-edges")
 def get_live_edges():
     current_time = time.time()
     
     # Cache Check
     if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]:
+        print("⚡ Serving from Cache")
         return api_cache["data"]
 
-    print("🚀 Fetching Fresh Data from API-Football (Pro Plan)...")
+    print(f"🚀 Fetching Fresh Data from API-Football (Season {CURRENT_SEASON})...")
     
     final_results = []
     
@@ -154,9 +160,17 @@ def get_live_edges():
 
     # 1. Fetch Next 30 Fixtures (Bundesliga)
     url_fixtures = f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&next=30"
+    
     try:
-        res_fix = requests.get(url_fixtures, headers=headers).json()
-        fixtures = res_fix.get("response", [])
+        res_fix = requests.get(url_fixtures, headers=headers)
+        print(f"📡 API Response Code: {res_fix.status_code}")
+        
+        if res_fix.status_code != 200:
+             print(f"❌ API Error Message: {res_fix.text}")
+             return []
+
+        fixtures = res_fix.json().get("response", [])
+        print(f"🗓️ Found {len(fixtures)} upcoming fixtures.")
         
         for f in fixtures:
             fix_id = f["fixture"]["id"]
@@ -173,17 +187,16 @@ def get_live_edges():
                 model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
                 fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
 
-            # 3. FETCH ODDS FOR THIS GAME
-            # Pro Plan allows this! (1 call per game)
+            # 3. FETCH ODDS FOR THIS GAME (1 call per game)
             market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
             
             url_odds = f"https://v3.football.api-sports.io/odds?fixture={fix_id}"
             res_odds = requests.get(url_odds, headers=headers).json()
             
             if res_odds.get("response"):
-                # Usually many bookmakers, pick the first reliable one (e.g. Bet365 ID=1 or Bwin ID=6)
+                # Pick reliable bookmaker (Bet365=1, Bwin=6, Unibet=8)
                 bookmakers = res_odds["response"][0]["bookmakers"]
-                bookie = next((b for b in bookmakers if b["id"] == 1), bookmakers[0] if bookmakers else None)
+                bookie = next((b for b in bookmakers if b["id"] == 1 or b["id"] == 8), bookmakers[0] if bookmakers else None)
                 
                 if bookie:
                     for bet in bookie["bets"]:
@@ -199,19 +212,6 @@ def get_live_edges():
                             for v in bet["values"]:
                                 if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
                                 if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
-
-                        # Asian Handicap (ID: 4) or Handicap (ID: 3)
-                        # We look for a small handicap to act as 'Safer Option'
-                        if bet["id"] == 4:
-                            # Just grabbing the first main line for now
-                            for v in bet["values"]:
-                                if v["value"] == "Home": 
-                                    market_odds["H_Spread"] = float(v["odd"])
-                                    # API Football sends "Home" but handicap is usually in separate field or string, 
-                                    # For Asian, value might be "Home" and "handicap" field exists?
-                                    # API-Football structure for handicap is weird. Often value is "Home" and there is a "handicap" key?
-                                    # Actually, let's stick to Double Chance as primary. 
-                                    pass
 
             final_results.append({
                 "id": fix_id,
@@ -234,7 +234,7 @@ def get_live_edges():
             })
 
     except Exception as e:
-        print(f"❌ API Error: {e}")
+        print(f"❌ Critical Error: {e}")
 
     # Sort by Date
     final_results.sort(key=lambda x: x['date'])
