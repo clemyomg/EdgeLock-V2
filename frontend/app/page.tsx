@@ -160,7 +160,7 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
             label="1" 
             prob={data.probs["1"]} fair={data.fair_odds["1"]} market={homeOdd} 
             bankroll={bankroll} 
-            warning={homeRisky ? "⚠️ Higher Risk" : ""} 
+            isRisky={homeRisky} 
           />
           
           {/* HOME SAFER OPTION */}
@@ -189,7 +189,7 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
             label="2" 
             prob={data.probs["2"]} fair={data.fair_odds["2"]} market={awayOdd} 
             bankroll={bankroll} 
-            warning={awayRisky ? "⚠️ Higher Risk" : ""} 
+            isRisky={awayRisky} 
           />
 
           {/* AWAY SAFER OPTION */}
@@ -217,7 +217,7 @@ function MatchCard({ data, bankroll }: { data: any, bankroll: number }) {
   );
 }
 
-function BettingRow({ label, prob, fair, market, bankroll, highlight, warning }: any) {
+function BettingRow({ label, prob, fair, market, bankroll, highlight, isRisky }: any) {
   const [userOdds, setUserOdds] = useState(market || 0);
   useEffect(() => { if (market > 0) setUserOdds(market); }, [market]);
 
@@ -230,10 +230,11 @@ function BettingRow({ label, prob, fair, market, bankroll, highlight, warning }:
   return (
     <div className={`grid grid-cols-12 gap-2 items-center mb-1 p-2 rounded transition-all ${highlight ? "bg-emerald-900/10 border border-emerald-500/20" : "hover:bg-zinc-900/40 border border-transparent"}`}>
       
-      {/* Label & Warning */}
+      {/* Label */}
       <div className="col-span-5 flex flex-col justify-center leading-tight">
-        <div className={`text-xs font-bold ${highlight ? "text-emerald-400" : "text-zinc-300"}`}>{label}</div>
-        {warning && <div className="text-[9px] text-orange-500/80 font-bold uppercase tracking-wider mt-0.5">{warning}</div>}
+        <div className={`text-xs font-bold ${highlight ? "text-emerald-400" : isRisky ? "text-orange-400" : "text-zinc-300"}`}>
+          {label}
+        </div>
       </div>
       
       {/* Fair Odds */}
@@ -247,7 +248,7 @@ function BettingRow({ label, prob, fair, market, bankroll, highlight, warning }:
         <div className="text-[8px] text-zinc-600 uppercase">Bookie</div>
         <input 
           type="number" step="0.01"
-          className="w-12 bg-black/50 border border-zinc-800 text-center text-white font-bold rounded py-0.5 text-xs outline-none focus:border-emerald-500 focus:bg-black transition-colors"
+          className={`w-12 bg-black/50 border text-center font-bold rounded py-0.5 text-xs outline-none focus:bg-black transition-colors ${isRisky ? "text-orange-400 border-orange-500/30" : "text-white border-zinc-800 focus:border-emerald-500"}`}
           value={userOdds}
           onChange={(e) => setUserOdds(parseFloat(e.target.value))}
         />

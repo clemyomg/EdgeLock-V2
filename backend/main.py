@@ -197,7 +197,6 @@ def get_live_edges():
                     model_probs = {k: round(v * 100, 1) for k, v in probs.items()}
                     fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items()}
 
-                # Initialize all odds to 0
                 market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "H_Spread": 0, "H_Spread_Point": 0, "A_Spread": 0, "A_Spread_Point": 0 }
                 bookie = next((b for b in game['bookmakers'] if 'unibet' in b['key'] or 'betfair' in b['key']), game['bookmakers'][0] if game['bookmakers'] else None)
                 
@@ -210,26 +209,33 @@ def get_live_edges():
                             elif o['name'] == away: market_odds["2"] = o['price']
                             elif o['name'] == 'Draw': market_odds["X"] = o['price']
                     
-                    # ✅ IMPROVED DOUBLE CHANCE (Case Insensitive Matching)
+                    # ✅ IMPROVED DOUBLE CHANCE (Smart Fuzzy Match)
                     dc = next((m for m in bookie['markets'] if m['key'] == 'doublechance'), None)
                     if dc:
                         for o in dc['outcomes']:
                             name = o['name'].lower()
-                            # 1X: Contains Home OR "Home", AND Contains "Draw"
-                            if (home.lower() in name or "home" in name) and "draw" in name: 
-                                market_odds["1X"] = o['price']
-                            # X2: Contains Away OR "Away", AND Contains "Draw"
-                            if (away.lower() in name or "away" in name) and "draw" in name: 
-                                market_odds["X2"] = o['price']
+                            # Try exact match first
+                            if (home.lower() in name and "draw" in name): market_odds["1X"] = o['price']
+                            elif (away.lower() in name and "draw" in name): market_odds["X2"] = o['price']
+                            # If that fails, try First Word match (e.g. "Man" matches "Man Utd")
+                            else:
+                                h_part = home.lower().split(' ')[0]
+                                a_part = away.lower().split(' ')[0]
+                                if (h_part in name and "draw" in name): market_odds["1X"] = o['price']
+                                if (a_part in name and "draw" in name): market_odds["X2"] = o['price']
 
-                    # ✅ IMPROVED SPREADS (Case Insensitive Matching)
+                    # ✅ IMPROVED SPREADS (Smart Fuzzy Match)
                     spreads = next((m for m in bookie['markets'] if m['key'] == 'spreads'), None)
                     if spreads:
                         for o in spreads['outcomes']:
-                            if o['name'].lower() == home.lower(): 
+                            name = o['name'].lower()
+                            h_part = home.lower().split(' ')[0]
+                            a_part = away.lower().split(' ')[0]
+                            
+                            if name == home.lower() or h_part in name: 
                                 market_odds["H_Spread"] = o['price']
                                 market_odds["H_Spread_Point"] = o['point']
-                            elif o['name'].lower() == away.lower(): 
+                            elif name == away.lower() or a_part in name: 
                                 market_odds["A_Spread"] = o['price']
                                 market_odds["A_Spread_Point"] = o['point']
 
