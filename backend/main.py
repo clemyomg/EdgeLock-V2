@@ -39,7 +39,7 @@ app.add_middleware(
 def normalize_name(name):
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
-# --- 1. TRAINING (Unchanged) ---
+# --- 1. TRAINING ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
     if not os.path.exists(folder_path): return None
@@ -198,7 +198,7 @@ def get_live_edges(db: Session = Depends(get_db)):
                 fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items() if k in ["1","X","2","1X","X2"]}
                 predicted_score = f"{probs['xg_h']:.2f} - {probs['xg_a']:.2f}"
 
-                # 💾 SAVE/UPDATE DATABASE ("The Gold Mine")
+                # 💾 SAVE/UPDATE DATABASE
                 existing_pred = db.query(MatchPrediction).filter(MatchPrediction.fixture_id == fix_id).first()
                 
                 # Extract Live Data
@@ -225,18 +225,17 @@ def get_live_edges(db: Session = Depends(get_db)):
                         minute=current_time_min,
                         actual_home_goals=goals_h,
                         actual_away_goals=goals_a,
-                        raw_data=f # 🏆 Save entire API object
+                        raw_data=f 
                     )
                     db.add(new_pred)
                     db.commit()
                 else:
-                    # Update Existing (Live Score & Status)
+                    # Update Existing
                     existing_pred.status = current_status
                     existing_pred.minute = current_time_min
                     existing_pred.actual_home_goals = goals_h
                     existing_pred.actual_away_goals = goals_a
-                    existing_pred.raw_data = f # Update with latest event data
-                    # Also update model if it refined?
+                    existing_pred.raw_data = f 
                     existing_pred.model_home_xg = float(probs['xg_h'])
                     existing_pred.model_away_xg = float(probs['xg_a'])
                     db.commit()
@@ -265,6 +264,8 @@ def get_live_edges(db: Session = Depends(get_db)):
                 "id": fix_id,
                 "date": f["fixture"]["date"],
                 "match": f"{home_name} vs {away_name}",
+                "home_team": home_name,  # 👈 RE-ADDED THIS
+                "away_team": away_name,  # 👈 RE-ADDED THIS
                 "league": "Bundesliga",
                 "round": f["league"]["round"],
                 "score": {
