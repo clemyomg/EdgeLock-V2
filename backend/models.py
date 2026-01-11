@@ -1,8 +1,10 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, Boolean
+# backend/models.py
+from sqlalchemy import Column, Integer, String, Float, JSON, Boolean
 from database import Base
 
 class MatchPrediction(Base):
-    __tablename__ = "predictions_v2" # Keeping same table to preserve your current data
+    # 💥 Renaming to v3 forces a fresh start with the new columns
+    __tablename__ = "predictions_v3"
 
     id = Column(Integer, primary_key=True, index=True)
     fixture_id = Column(Integer, unique=True, index=True) 
@@ -26,8 +28,8 @@ class MatchPrediction(Base):
     actual_home_goals = Column(Integer, nullable=True)
     actual_away_goals = Column(Integer, nullable=True)
     
-    # ✅ NEW: The "Done" Flag
+    # ✅ THE NEW FLAG (This caused the crash, now fixed!)
     is_settled = Column(Boolean, default=False)
 
-    # THE GOLD MINE 🏆 (Stores everything: Weather, xG, Shots, Lineups)
+    # THE GOLD MINE 🏆
     raw_data = Column(JSON, nullable=True)
