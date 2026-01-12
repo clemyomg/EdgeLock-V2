@@ -184,7 +184,7 @@ def get_live_edges(db: Session = Depends(get_db)):
                 if games: combined_fixtures.extend(games)
         except: pass
 
-    # 2. ODDS BATCHING
+    # 2. ODDS BATCHING (STRICT)
     odds_cache = {}
     if combined_fixtures:
         for league_name, league_id in LEAGUE_CONFIG.items():
@@ -198,7 +198,12 @@ def get_live_edges(db: Session = Depends(get_db)):
                             if fid not in odds_cache: odds_cache[fid] = []
                             new_bookies = item["bookmakers"]
                             if not new_bookies: continue
-                            target = next((b for b in new_bookies if b["id"] == 1), new_bookies[0])
+                            
+                            # PRIORITIZE TRUSTED BOOKIES
+                            # 1 = Bet365, 8 = William Hill, 3 = Betfair
+                            preferred = [1, 8, 3]
+                            target = next((b for b in new_bookies if b["id"] in preferred), new_bookies[0])
+                            
                             existing = next((b for b in odds_cache[fid] if b["id"] == target["id"]), None)
                             if existing: existing["bets"].extend(target["bets"])
                             else: odds_cache[fid].append(target)
@@ -249,7 +254,7 @@ def get_live_edges(db: Session = Depends(get_db)):
             score_display = probs["most_likely_score"]
             predicted_score = { "home": f"{probs['xg_h']:.2f}", "away": f"{probs['xg_a']:.2f}" }
             
-            # --- ODDS PARSING (NUCLEAR OPTION) ---
+            # --- STRICT PARSER ---
             market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "Handicaps": [], "Goals": {} }
             for g_line in [1.5, 2.5, 3.5, 4.5]:
                 market_odds["Goals"][f"{g_line}"] = { "Over": 0, "Under": 0 }
@@ -262,7 +267,10 @@ def get_live_edges(db: Session = Depends(get_db)):
                  except: pass
 
             if bookies:
-                target_bookie = next((b for b in bookies if b["id"] == 1), bookies[0])
+                # Priority: Bet365 > WilliamHill > Others
+                preferred = [1, 8, 3]
+                target_bookie = next((b for b in bookies if b["id"] in preferred), bookies[0])
+                
                 for bet in target_bookie["bets"]:
                     if bet["id"] == 1: # Winner
                         for v in bet["values"]:
@@ -273,24 +281,23 @@ def get_live_edges(db: Session = Depends(get_db)):
                         for v in bet["values"]:
                             if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
                             if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
-                    elif bet["id"] == 6: # Goals Over/Under (Standard)
+                    elif bet["id"] == 6: # GOALS (Strict)
                         for v in bet["values"]:
                             val_str = str(v["value"]) 
                             odd_val = float(v["odd"])
-                            # Matches "Over 2.5" exactly
                             for g_line in [1.5, 2.5, 3.5, 4.5]:
                                 if val_str == f"Over {g_line}": market_odds["Goals"][str(g_line)]["Over"] = odd_val
                                 if val_str == f"Under {g_line}": market_odds["Goals"][str(g_line)]["Under"] = odd_val
-                    elif bet["id"] == 5 or "Asian" in bet["name"]: # Asian
+                    elif bet["id"] == 5: # ASIAN HANDICAP (Strict)
                             for v in bet["values"]:
                                 try:
                                     label = str(v["value"]) 
                                     odd = float(v["odd"])
-                                    # NUCLEAR FILTER: BAN "OVER" FROM HANDICAPS
-                                    if "Over" not in label and "Under" not in label:
-                                        # Normalize "Home + 1.5" -> "Home +1.5"
-                                        label = label.replace(" + ", " +").replace(" - ", " -")
-                                        market_odds["Handicaps"].append({ "label": label, "odd": odd })
+                                    # SKIP "Asian Goal Lines" (Over/Under)
+                                    if "Over" in label or "Under" in label: continue
+                                    
+                                    # Keep only +/- handicaps
+                                    market_odds["Handicaps"].append({ "label": label, "odd": odd })
                                 except: pass
 
             f["market_odds_cache"] = market_odds 
