@@ -10,6 +10,7 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_
+from sqlalchemy.exc import OperationalError
 
 from database import engine, get_db, Base
 from models import MatchPrediction
@@ -140,17 +141,19 @@ def calculate_all_probabilities(league, home, away):
 
 # --- 3. SETTLEMENT ---
 def settle_finished_games(db: Session):
-    game = db.query(MatchPrediction).filter(MatchPrediction.status == "FT", MatchPrediction.is_settled == False).first()
-    if not game: return 
-    headers = { "x-rapidapi-key": FOOTBALL_API_KEY, "x-rapidapi-host": "v3.football.api-sports.io" }
     try:
+        game = db.query(MatchPrediction).filter(MatchPrediction.status == "FT", MatchPrediction.is_settled == False).first()
+        if not game: return 
+        headers = { "x-rapidapi-key": FOOTBALL_API_KEY, "x-rapidapi-host": "v3.football.api-sports.io" }
         stats = requests.get(f"https://v3.football.api-sports.io/fixtures/statistics?fixture={game.fixture_id}", headers=headers).json().get("response", [])
         game.is_settled = True
         current_raw = game.raw_data or {}
         current_raw["statistics"] = stats
         game.raw_data = current_raw
         db.commit()
-    except Exception as e: print(f"Settlement Error: {e}")
+    except Exception as e: 
+        print(f"Settlement Error: {e}")
+        db.rollback()
 
 # --- 4. MAIN ENDPOINT ---
 @app.get("/live-edges")
@@ -159,14 +162,18 @@ def get_live_edges(db: Session = Depends(get_db)):
     current_time = time.time()
     
     history = []
-    settled = db.query(MatchPrediction).filter(MatchPrediction.status == "FT").order_by(desc(MatchPrediction.id)).limit(20).all()
-    for g in settled:
-        history.append({
-            "match": f"{g.home_team} vs {g.away_team}",
-            "score": f"{g.actual_home_goals}-{g.actual_away_goals}",
-            "prediction": f"{g.model_home_xg:.2f} - {g.model_away_xg:.2f}",
-            "result": "Settled"
-        })
+    try:
+        settled = db.query(MatchPrediction).filter(MatchPrediction.status == "FT").order_by(desc(MatchPrediction.id)).limit(20).all()
+        for g in settled:
+            history.append({
+                "match": f"{g.home_team} vs {g.away_team}",
+                "score": f"{g.actual_home_goals}-{g.actual_away_goals}",
+                "prediction": f"{g.model_home_xg:.2f} - {g.model_away_xg:.2f}",
+                "result": "Settled"
+            })
+    except OperationalError:
+        db.rollback()
+        history = []
 
     if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]: 
         return { "matches": api_cache["data"], "history": history }
@@ -189,6 +196,7 @@ def get_live_edges(db: Session = Depends(get_db)):
     if combined_fixtures:
         for league_name, league_id in LEAGUE_CONFIG.items():
             if league_name not in league_stats: continue
+            # Added Bet ID 5 (Asian Handicap) explicitly to list to ensure it's fetched if API supports batching for it
             for bet_id in [1, 5, 6]:
                 try:
                     res = requests.get(f"https://v3.football.api-sports.io/odds?league={league_id}&season={CURRENT_SEASON}&bet={bet_id}", headers=headers)
@@ -200,8 +208,7 @@ def get_live_edges(db: Session = Depends(get_db)):
                             if not new_bookies: continue
                             
                             # PRIORITIZE TRUSTED BOOKIES
-                            # 1 = Bet365, 8 = William Hill, 3 = Betfair
-                            preferred = [1, 8, 3]
+                            preferred = [1, 8, 3] # Bet365, William Hill, Betfair
                             target = next((b for b in new_bookies if b["id"] in preferred), new_bookies[0])
                             
                             existing = next((b for b in odds_cache[fid] if b["id"] == target["id"]), None)
@@ -240,6 +247,8 @@ def get_live_edges(db: Session = Depends(get_db)):
         if f["fixture"]["id"] in seen_ids: continue
         seen_ids.add(f["fixture"]["id"])
         
+        has_model = False # Initialize to prevent NameError
+        
         try:
             fix_id = f["fixture"]["id"]
             home, away = f["teams"]["home"]["name"], f["teams"]["away"]["name"]
@@ -271,6 +280,17 @@ def get_live_edges(db: Session = Depends(get_db)):
                 preferred = [1, 8, 3]
                 target_bookie = next((b for b in bookies if b["id"] in preferred), bookies[0])
                 
+                # First pass: Bet 6 (Standard Goals)
+                for bet in target_bookie["bets"]:
+                    if bet["id"] == 6: # GOALS (Standard)
+                        for v in bet["values"]:
+                            val_str = str(v["value"]) 
+                            odd_val = float(v["odd"])
+                            for g_line in [1.5, 2.5, 3.5, 4.5]:
+                                if val_str == f"Over {g_line}": market_odds["Goals"][str(g_line)]["Over"] = odd_val
+                                if val_str == f"Under {g_line}": market_odds["Goals"][str(g_line)]["Under"] = odd_val
+                                
+                # Second pass: Everything else + Asian Overwrite
                 for bet in target_bookie["bets"]:
                     if bet["id"] == 1: # Winner
                         for v in bet["values"]:
@@ -281,22 +301,25 @@ def get_live_edges(db: Session = Depends(get_db)):
                         for v in bet["values"]:
                             if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
                             if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
-                    elif bet["id"] == 6: # GOALS (Strict)
-                        for v in bet["values"]:
-                            val_str = str(v["value"]) 
-                            odd_val = float(v["odd"])
-                            for g_line in [1.5, 2.5, 3.5, 4.5]:
-                                if val_str == f"Over {g_line}": market_odds["Goals"][str(g_line)]["Over"] = odd_val
-                                if val_str == f"Under {g_line}": market_odds["Goals"][str(g_line)]["Under"] = odd_val
-                    elif bet["id"] == 5: # ASIAN HANDICAP (Strict)
+                    elif bet["id"] == 5: # ASIAN HANDICAP (Priority for Goals + Large Underdogs)
                             for v in bet["values"]:
                                 try:
                                     label = str(v["value"]) 
                                     odd = float(v["odd"])
-                                    # SKIP "Asian Goal Lines" (Over/Under)
-                                    if "Over" in label or "Under" in label: continue
                                     
-                                    # Keep only +/- handicaps
+                                    # Check for Asian Goal Lines (Over/Under) and OVERWRITE Bet 6
+                                    # This fixes the "wrong odds" issue by using the Asian market which often has better pricing/liquidity
+                                    if "Over" in label or "Under" in label:
+                                        parts = label.split(" ")
+                                        if len(parts) >= 2:
+                                            line_val = parts[1]
+                                            type_val = parts[0] # Over or Under
+                                            if line_val in market_odds["Goals"]:
+                                                market_odds["Goals"][line_val][type_val] = odd
+                                                print(f"✅ Swapped Goal Odd {line_val} {type_val} -> {odd} (Asian)")
+                                        continue
+
+                                    # Keep all handicaps, including large ones (+1.5, +2.5 etc)
                                     market_odds["Handicaps"].append({ "label": label, "odd": odd })
                                 except: pass
 
