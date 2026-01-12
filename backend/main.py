@@ -196,7 +196,6 @@ def get_live_edges(db: Session = Depends(get_db)):
     if combined_fixtures:
         for league_name, league_id in LEAGUE_CONFIG.items():
             if league_name not in league_stats: continue
-            # Added Bet ID 5 (Asian Handicap) explicitly to list to ensure it's fetched if API supports batching for it
             for bet_id in [1, 5, 6]:
                 try:
                     res = requests.get(f"https://v3.football.api-sports.io/odds?league={league_id}&season={CURRENT_SEASON}&bet={bet_id}", headers=headers)
@@ -247,7 +246,7 @@ def get_live_edges(db: Session = Depends(get_db)):
         if f["fixture"]["id"] in seen_ids: continue
         seen_ids.add(f["fixture"]["id"])
         
-        has_model = False # Initialize to prevent NameError
+        has_model = False # Initialize safely to prevent NameError
         
         try:
             fix_id = f["fixture"]["id"]
@@ -280,7 +279,7 @@ def get_live_edges(db: Session = Depends(get_db)):
                 preferred = [1, 8, 3]
                 target_bookie = next((b for b in bookies if b["id"] in preferred), bookies[0])
                 
-                # First pass: Bet 6 (Standard Goals)
+                # First pass: Bet 6 (Standard Goals) - Baseline
                 for bet in target_bookie["bets"]:
                     if bet["id"] == 6: # GOALS (Standard)
                         for v in bet["values"]:
@@ -290,7 +289,7 @@ def get_live_edges(db: Session = Depends(get_db)):
                                 if val_str == f"Over {g_line}": market_odds["Goals"][str(g_line)]["Over"] = odd_val
                                 if val_str == f"Under {g_line}": market_odds["Goals"][str(g_line)]["Under"] = odd_val
                                 
-                # Second pass: Everything else + Asian Overwrite
+                # Second pass: Winner, DC, and Asian (Overwrite Goals + Strict Handicap)
                 for bet in target_bookie["bets"]:
                     if bet["id"] == 1: # Winner
                         for v in bet["values"]:
@@ -301,14 +300,13 @@ def get_live_edges(db: Session = Depends(get_db)):
                         for v in bet["values"]:
                             if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
                             if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
-                    elif bet["id"] == 5: # ASIAN HANDICAP (Priority for Goals + Large Underdogs)
+                    elif bet["id"] == 5: # ASIAN HANDICAP 
                             for v in bet["values"]:
                                 try:
                                     label = str(v["value"]) 
                                     odd = float(v["odd"])
                                     
-                                    # Check for Asian Goal Lines (Over/Under) and OVERWRITE Bet 6
-                                    # This fixes the "wrong odds" issue by using the Asian market which often has better pricing/liquidity
+                                    # 1. Asian Goal Line Overwrite (Verified Working)
                                     if "Over" in label or "Under" in label:
                                         parts = label.split(" ")
                                         if len(parts) >= 2:
@@ -319,8 +317,12 @@ def get_live_edges(db: Session = Depends(get_db)):
                                                 print(f"✅ Swapped Goal Odd {line_val} {type_val} -> {odd} (Asian)")
                                         continue
 
-                                    # Keep all handicaps, including large ones (+1.5, +2.5 etc)
-                                    market_odds["Handicaps"].append({ "label": label, "odd": odd })
+                                    # 2. Strict Handicap Filter (NEW)
+                                    # Only allowing: Home/Away +1.5, +2.5
+                                    allowed_handicaps = ["Home +1.5", "Away +1.5", "Home +2.5", "Away +2.5"]
+                                    if label in allowed_handicaps:
+                                        market_odds["Handicaps"].append({ "label": label, "odd": odd })
+                                        
                                 except: pass
 
             f["market_odds_cache"] = market_odds 
