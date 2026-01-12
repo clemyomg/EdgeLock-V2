@@ -9,22 +9,21 @@ from scipy.stats import poisson
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import desc, or_
 
-# ✅ Import Database tools
 from database import engine, get_db, Base
 from models import MatchPrediction
 from mappings import NAME_MAP
 
-# Update Tables
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
 # --- CONFIG ---
 FOOTBALL_API_KEY = "7bea55228c0e0fbd7de71e7f5ff3802f"
-LEAGUE_CONFIG = { "Bundesliga": 78 } 
+LEAGUE_CONFIG = { "Bundesliga": 78, "Premier League": 39, "La Liga": 140, "Serie A": 135, "Ligue 1": 61 } 
 CURRENT_SEASON = 2025 
-CACHE_DURATION = 60 
+CACHE_DURATION = 300 
 
 api_cache = { "last_updated": 0, "data": [] }
 league_stats = {}
@@ -39,38 +38,29 @@ app.add_middleware(
 def normalize_name(name):
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
-# --- 1. TRAINING ---
+# --- 1. TRAINING (Unchanged) ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
     if not os.path.exists(folder_path): return None
-
     dfs = []
     for file in os.listdir(folder_path):
         if file.endswith(".csv"):
-            try:
-                dfs.append(pd.read_csv(os.path.join(folder_path, file)))
+            try: dfs.append(pd.read_csv(os.path.join(folder_path, file)))
             except: pass
-    
     if not dfs: return None
-    
     full_df = pd.concat(dfs)
     df = full_df[full_df['Result'].notna()].copy()
-    
     df['DateObj'] = pd.to_datetime(df['Date'], errors='coerce')
     latest = df['DateObj'].max()
     df['weight'] = np.exp(-0.0025 * (latest - df['DateObj']).dt.days)
-
     metric = 'xG' if 'xG' in df.columns else 'GF'
     if metric not in df.columns: metric = 'GF'
-
     game_map = df.set_index(['Date', 'Team'])[metric].to_dict()
     df['xGA'] = df.apply(lambda r: game_map.get((r['Date'], r['Opp']), 0), axis=1)
-
     h_games = df[df['Venue'] != '@']
     a_games = df[df['Venue'] == '@']
     avg_h = np.average(h_games[metric], weights=h_games['weight'])
     avg_a = np.average(a_games[metric], weights=a_games['weight'])
-
     stats = {}
     for team in df['Team'].unique():
         th = h_games[h_games['Team'] == team]
@@ -82,8 +72,6 @@ def train_league_model(league_name):
                 'att_a': np.average(ta[metric], weights=ta['weight']) / avg_a,
                 'def_a': np.average(ta['xGA'], weights=ta['weight']) / avg_h
             }
-    
-    print(f"✅ LOADED TEAMS: {len(stats)}")
     return {"stats": stats, "avg_h": avg_h, "avg_a": avg_a}
 
 train_res = train_league_model("Bundesliga")
@@ -94,200 +82,266 @@ def calculate_all_probabilities(league, home, away):
     if league not in league_stats: return None
     db_stats = league_stats[league]
     stats = db_stats["stats"]
-    
     home_mapped = NAME_MAP.get(home, home)
     away_mapped = NAME_MAP.get(away, away)
-
     if home_mapped not in stats:
         for k in stats.keys():
-            if normalize_name(home) == normalize_name(k):
-                home_mapped = k
-                break
+            if normalize_name(home) == normalize_name(k): home_mapped = k; break
     if away_mapped not in stats:
         for k in stats.keys():
-            if normalize_name(away) == normalize_name(k):
-                away_mapped = k
-                break
-
+            if normalize_name(away) == normalize_name(k): away_mapped = k; break
     if home_mapped not in stats or away_mapped not in stats: return None
-
     h, a = stats[home_mapped], stats[away_mapped]
     xg_h = h['att_h'] * a['def_a'] * db_stats['avg_h']
     xg_a = a['att_a'] * h['def_h'] * db_stats['avg_a']
-
     prob_h, prob_d, prob_a = 0, 0, 0
-    for i in range(10):
-        for j in range(10):
+    
+    # Track Goals 1.5 - 4.5
+    goal_keys = [1.5, 2.5, 3.5, 4.5]
+    probs_goals = {f"Over{x}": 0 for x in goal_keys}
+    
+    handicap_lines = [-2.5, -1.5, 1.5, 2.5]
+    probs_handicap = {f"Home{'+' if h>0 else ''}{h}": 0 for h in handicap_lines}
+
+    max_score_prob = 0
+    most_likely_score = (0, 0)
+
+    for i in range(15): 
+        for j in range(15):
             p = poisson.pmf(i, xg_h) * poisson.pmf(j, xg_a)
+            if p > max_score_prob:
+                max_score_prob = p
+                most_likely_score = (i, j)
             if i > j: prob_h += p
             elif i == j: prob_d += p
             else: prob_a += p
+            
+            total = i + j
+            for x in goal_keys:
+                if total > x: probs_goals[f"Over{x}"] += p
 
-    return {"1": prob_h, "X": prob_d, "2": prob_a, "1X": prob_h + prob_d, "X2": prob_d + prob_a, "xg_h": xg_h, "xg_a": xg_a}
+            for h in handicap_lines:
+                if (i + h) > j:
+                    probs_handicap[f"Home{'+' if h>0 else ''}{h}"] += p
 
-# --- 3. THE SETTLEMENT ENGINE 🏆 ---
-def settle_finished_games(db: Session):
-    # Find 1 game that is finished (FT) but NOT settled
-    game_to_settle = db.query(MatchPrediction).filter(
-        MatchPrediction.status == "FT",
-        MatchPrediction.is_settled == False
-    ).first()
-
-    if not game_to_settle:
-        return # Nothing to do
-
-    print(f"⛏️ Mining Gold Data for: {game_to_settle.home_team} vs {game_to_settle.away_team}...")
-    
-    headers = {
-        "x-rapidapi-key": FOOTBALL_API_KEY,
-        "x-rapidapi-host": "v3.football.api-sports.io"
+    result = { 
+        "1": prob_h, "X": prob_d, "2": prob_a, "1X": prob_h + prob_d, "X2": prob_d + prob_a,
+        "xg_h": xg_h, "xg_a": xg_a, "most_likely_score": f"{most_likely_score[0]}-{most_likely_score[1]}"
     }
-    
-    fix_id = game_to_settle.fixture_id
-    gold_data = game_to_settle.raw_data or {}
+    for k, v in probs_goals.items():
+        result[k] = v
+        result[k.replace("Over", "Under")] = 1 - v
+    for h in handicap_lines:
+        key = f"Home{'+' if h>0 else ''}{h}"
+        result[key] = probs_handicap[key]
+        result[f"Away{'+' if -h>0 else ''}{-h}"] = 1 - probs_handicap[key]
 
+    return result
+
+# --- 3. SETTLEMENT ---
+def settle_finished_games(db: Session):
+    game = db.query(MatchPrediction).filter(MatchPrediction.status == "FT", MatchPrediction.is_settled == False).first()
+    if not game: return 
+    headers = { "x-rapidapi-key": FOOTBALL_API_KEY, "x-rapidapi-host": "v3.football.api-sports.io" }
     try:
-        # 1. Fetch Statistics (xG, Shots, Corners)
-        stats_res = requests.get(f"https://v3.football.api-sports.io/fixtures/statistics?fixture={fix_id}", headers=headers).json()
-        gold_data["statistics"] = stats_res.get("response", [])
-
-        # 2. Fetch Events (Goals, Cards, Subs)
-        events_res = requests.get(f"https://v3.football.api-sports.io/fixtures/events?fixture={fix_id}", headers=headers).json()
-        gold_data["events"] = events_res.get("response", [])
-
-        # 3. Fetch Lineups (Players)
-        lineups_res = requests.get(f"https://v3.football.api-sports.io/fixtures/lineups?fixture={fix_id}", headers=headers).json()
-        gold_data["lineups"] = lineups_res.get("response", [])
-
-        # ✅ Save & Mark Settled
-        game_to_settle.raw_data = gold_data
-        game_to_settle.is_settled = True
+        stats = requests.get(f"https://v3.football.api-sports.io/fixtures/statistics?fixture={game.fixture_id}", headers=headers).json().get("response", [])
+        game.is_settled = True
+        current_raw = game.raw_data or {}
+        current_raw["statistics"] = stats
+        game.raw_data = current_raw
         db.commit()
-        print(f"✅ Data Captured & Settled!")
-
-    except Exception as e:
-        print(f"❌ Settlement Failed: {e}")
+    except Exception as e: print(f"Settlement Error: {e}")
 
 # --- 4. MAIN ENDPOINT ---
 @app.get("/live-edges")
 def get_live_edges(db: Session = Depends(get_db)):
-    # ⛏️ Run the miner first (Opportunistic Settlement)
     settle_finished_games(db)
-
     current_time = time.time()
     
-    if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]:
-        return api_cache["data"]
+    # HISTORY
+    history = []
+    settled = db.query(MatchPrediction).filter(MatchPrediction.status == "FT").order_by(desc(MatchPrediction.id)).limit(20).all()
+    for g in settled:
+        history.append({
+            "match": f"{g.home_team} vs {g.away_team}",
+            "score": f"{g.actual_home_goals}-{g.actual_away_goals}",
+            "prediction": f"{g.model_home_xg:.2f} - {g.model_away_xg:.2f}",
+            "result": "Settled"
+        })
 
-    print(f"🚀 Fetching Live & Upcoming Data...")
-    headers = {
-        "x-rapidapi-key": FOOTBALL_API_KEY,
-        "x-rapidapi-host": "v3.football.api-sports.io"
-    }
+    if current_time - api_cache["last_updated"] < CACHE_DURATION and api_cache["data"]: 
+        return { "matches": api_cache["data"], "history": history }
 
+    headers = { "x-rapidapi-key": FOOTBALL_API_KEY, "x-rapidapi-host": "v3.football.api-sports.io" }
     combined_fixtures = []
-    seen_ids = set()
-
-    # Fetch Live & Next
-    for endpoint in ["live=all", "next=30"]:
+    
+    # 1. FETCH FIXTURES
+    for league_name, league_id in LEAGUE_CONFIG.items():
+        if league_name not in league_stats: continue
         try:
-            res = requests.get(f"https://v3.football.api-sports.io/fixtures?league=78&season={CURRENT_SEASON}&{endpoint}", headers=headers)
+            print(f"📡 Fetching Fixtures for {league_name}...")
+            res = requests.get(f"https://v3.football.api-sports.io/fixtures?league={league_id}&season={CURRENT_SEASON}&next=10", headers=headers)
             if res.status_code == 200:
                 games = res.json().get("response", [])
-                for g in games:
-                    if g["fixture"]["id"] not in seen_ids:
-                        combined_fixtures.append(g)
-                        seen_ids.add(g["fixture"]["id"])
-        except: pass
+                if games: combined_fixtures.extend(games)
+                print(f"✅ Found {len(games)} games.")
+            else:
+                print(f"❌ API Error: {res.status_code}")
+        except Exception as e: print(f"❌ Network Error: {e}")
 
+    # 2. SMART ODDS BATCHING (Winner + Handicap + Goals) 🧠
+    odds_cache = {}
+    if combined_fixtures:
+        for league_name, league_id in LEAGUE_CONFIG.items():
+            if league_name not in league_stats: continue
+            
+            # Fetch ALL 3 markets to save calls
+            for bet_id in [1, 5, 6]:
+                try:
+                    print(f"🔍 Fetching Market {bet_id} for {league_name}...")
+                    res = requests.get(f"https://v3.football.api-sports.io/odds?league={league_id}&season={CURRENT_SEASON}&bet={bet_id}", headers=headers)
+                    if res.status_code == 200:
+                        count = 0
+                        for item in res.json().get("response", []):
+                            fid = item["fixture"]["id"]
+                            if fid not in odds_cache: odds_cache[fid] = []
+                            
+                            # Merge bookies
+                            new_bookies = item["bookmakers"]
+                            if not new_bookies: continue
+                            
+                            # Find preferred bookie (Bet365=1)
+                            target = next((b for b in new_bookies if b["id"] == 1), new_bookies[0])
+                            
+                            # Check if we already have this bookie for this match
+                            existing = next((b for b in odds_cache[fid] if b["id"] == target["id"]), None)
+                            
+                            if existing:
+                                existing["bets"].extend(target["bets"])
+                            else:
+                                odds_cache[fid].append(target)
+                            count += 1
+                        print(f"   ↳ Loaded odds for {count} matches.")
+                except Exception as e: print(f"❌ Odds Error: {e}")
+
+    # DB FALLBACK
+    if not combined_fixtures:
+        print("⚠️ API Limit? Using DB.")
+        db_games = db.query(MatchPrediction).filter(or_(MatchPrediction.status != "FT", MatchPrediction.is_settled == False)).all()
+        fallback_results = []
+        for g in db_games:
+            probs = calculate_all_probabilities(g.league, g.home_team, g.away_team)
+            if not probs: continue
+            row = {
+                "id": g.fixture_id, "date": g.match_date, "match": f"{g.home_team} vs {g.away_team}",
+                "home_team": g.home_team, "away_team": g.away_team, "league": g.league,
+                "league_logo": g.raw_data.get("league",{}).get("logo"), "country_flag": g.raw_data.get("league",{}).get("flag"),
+                "home_logo": g.raw_data.get("teams",{}).get("home",{}).get("logo"), "away_logo": g.raw_data.get("teams",{}).get("away",{}).get("logo"),
+                "score": { "status": g.status, "time": g.minute, "goals_h": g.actual_home_goals, "goals_a": g.actual_away_goals },
+                "has_model": True,
+                "probs": {k: round(v * 100, 1) for k, v in probs.items() if k not in ["xg_h", "xg_a", "most_likely_score"]},
+                "predicted_xg": { "home": f"{probs['xg_h']:.2f}", "away": f"{probs['xg_a']:.2f}" },
+                "most_likely_score": probs["most_likely_score"],
+                "market_odds": g.raw_data.get("market_odds_cache", { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "Handicaps": [], "Goals": {} })
+            }
+            fallback_results.append(row)
+        fallback_results.sort(key=lambda x: x['date'])
+        return { "matches": fallback_results, "history": history }
+
+    seen_ids = set()
     final_results = []
     
     for f in combined_fixtures:
+        if f["fixture"]["id"] in seen_ids: continue
+        seen_ids.add(f["fixture"]["id"])
+        
         try:
             fix_id = f["fixture"]["id"]
-            home = f["teams"]["home"]["name"]
-            away = f["teams"]["away"]["name"]
-            
-            probs = calculate_all_probabilities("Bundesliga", home, away)
-            
-            has_model = False
-            model_probs, fair_odds, predicted_score = {}, {}, None
-            
-            if probs:
-                has_model = True
-                model_probs = {k: round(v * 100, 1) for k, v in probs.items() if k in ["1","X","2","1X","X2"]}
-                fair_odds = {k: round(1/v, 2) if v > 0 else 0 for k, v in probs.items() if k in ["1","X","2","1X","X2"]}
-                predicted_score = f"{probs['xg_h']:.2f} - {probs['xg_a']:.2f}"
+            home, away = f["teams"]["home"]["name"], f["teams"]["away"]["name"]
+            league_name = f["league"]["name"]
+            if league_name == "Bundesliga 1": league_name = "Bundesliga"
 
-                # 💾 DATABASE SYNC
-                existing = db.query(MatchPrediction).filter(MatchPrediction.fixture_id == fix_id).first()
-                
-                status = f["fixture"]["status"]["short"]
-                
-                if not existing:
-                    new_rec = MatchPrediction(
-                        fixture_id=fix_id, home_team=home, away_team=away, league="Bundesliga",
-                        match_date=f["fixture"]["date"],
-                        model_home_xg=float(probs['xg_h']), model_away_xg=float(probs['xg_a']),
-                        fair_odd_home=float(fair_odds.get("1", 0)), fair_odd_draw=float(fair_odds.get("X", 0)), fair_odd_away=float(fair_odds.get("2", 0)),
-                        status=status, minute=f["fixture"]["status"]["elapsed"],
-                        actual_home_goals=f["goals"]["home"], actual_away_goals=f["goals"]["away"],
-                        raw_data=f # Initial raw data (basic)
-                    )
-                    db.add(new_rec)
-                    db.commit()
-                else:
-                    # Update Live Status
-                    existing.status = status
-                    existing.minute = f["fixture"]["status"]["elapsed"]
-                    existing.actual_home_goals = f["goals"]["home"]
-                    existing.actual_away_goals = f["goals"]["away"]
-                    # Don't overwrite raw_data if we already mined gold (settled)
-                    if not existing.is_settled:
-                        existing.raw_data = f
-                    db.commit()
+            probs = calculate_all_probabilities(league_name, home, away)
+            if not probs: continue 
 
-            # Odds
-            market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0 }
-            res_odds = requests.get(f"https://v3.football.api-sports.io/odds?fixture={fix_id}", headers=headers).json()
-            if res_odds.get("response"):
-                bookies = res_odds["response"][0]["bookmakers"]
-                bookie = next((b for b in bookies if b["id"] == 1), bookies[0] if bookies else None)
-                if bookie:
-                    for bet in bookie["bets"]:
-                        if bet["id"] == 1:
-                             for v in bet["values"]:
-                                if v["value"] == "Home": market_odds["1"] = float(v["odd"])
-                                if v["value"] == "Away": market_odds["2"] = float(v["odd"])
-                                if v["value"] == "Draw": market_odds["X"] = float(v["odd"])
-                        if bet["id"] == 12:
-                             for v in bet["values"]:
-                                if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
-                                if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
+            has_model = True
+            model_probs = {k: round(v * 100, 1) for k, v in probs.items() if k not in ["xg_h", "xg_a", "most_likely_score"]}
+            score_display = probs["most_likely_score"]
+            predicted_score = { "home": f"{probs['xg_h']:.2f}", "away": f"{probs['xg_a']:.2f}" }
+            
+            # --- ODDS PARSING ---
+            market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "Handicaps": [], "Goals": {} }
+            # Initialize Goal Keys
+            for g_line in [1.5, 2.5, 3.5, 4.5]:
+                market_odds["Goals"][f"{g_line}"] = { "Over": 0, "Under": 0 }
+
+            # Retrieve from our smart merged cache
+            bookies = odds_cache.get(fix_id, [])
+            
+            # Fallback Deep Fetch if missing (Safety Net)
+            if not bookies:
+                 try:
+                    #print(f"🔍 Deep Fetch for Match {fix_id}...")
+                    res_odds = requests.get(f"https://v3.football.api-sports.io/odds?fixture={fix_id}", headers=headers).json()
+                    bookies = res_odds.get("response", [])[0].get("bookmakers", [])
+                 except: pass
+
+            if bookies:
+                target_bookie = next((b for b in bookies if b["id"] == 1), bookies[0])
+                for bet in target_bookie["bets"]:
+                    if bet["id"] == 1: # Winner
+                        for v in bet["values"]:
+                            if v["value"] == "Home": market_odds["1"] = float(v["odd"])
+                            if v["value"] == "Away": market_odds["2"] = float(v["odd"])
+                            if v["value"] == "Draw": market_odds["X"] = float(v["odd"])
+                    elif bet["id"] == 12: # DC
+                        for v in bet["values"]:
+                            if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
+                            if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
+                    elif bet["id"] == 6: # Goals
+                        for v in bet["values"]:
+                            val_str = str(v["value"]) # e.g. "Over 2.5"
+                            odd_val = float(v["odd"])
+                            
+                            # EXACT MATCHING to avoid shift
+                            for g_line in [1.5, 2.5, 3.5, 4.5]:
+                                if val_str == f"Over {g_line}": 
+                                    market_odds["Goals"][str(g_line)]["Over"] = odd_val
+                                elif val_str == f"Under {g_line}": 
+                                    market_odds["Goals"][str(g_line)]["Under"] = odd_val
+                                    
+                    elif bet["id"] == 5 or "Asian" in bet["name"]: # Asian
+                            for v in bet["values"]:
+                                try:
+                                    label = str(v["value"]) 
+                                    odd = float(v["odd"])
+                                    market_odds["Handicaps"].append({ "label": label, "odd": odd })
+                                except: pass
+
+            f["market_odds_cache"] = market_odds 
+            existing = db.query(MatchPrediction).filter(MatchPrediction.fixture_id == fix_id).first()
+            if not existing:
+                db.add(MatchPrediction(fixture_id=fix_id, home_team=home, away_team=away, league=league_name, match_date=f["fixture"]["date"],
+                    model_home_xg=float(probs['xg_h']) if probs else 0, model_away_xg=float(probs['xg_a']) if probs else 0,
+                    status=f["fixture"]["status"]["short"], minute=f["fixture"]["status"]["elapsed"], raw_data=f))
+                db.commit()
+            else:
+                existing.raw_data = f
+                db.commit()
 
             final_results.append({
-                "id": fix_id,
-                "date": f["fixture"]["date"],
-                "match": f"{home} vs {away}",
-                "home_team": home,
-                "away_team": away,
-                "league": "Bundesliga",
-                "round": f["league"]["round"],
-                "score": {
-                    "status": f["fixture"]["status"]["short"], 
-                    "time": f["fixture"]["status"]["elapsed"], 
-                    "goals_h": f["goals"]["home"], 
-                    "goals_a": f["goals"]["away"]
-                },
-                "has_model": has_model, 
-                "probs": model_probs,
-                "fair_odds": fair_odds,
-                "predicted_xg": predicted_score,
-                "market_odds": market_odds
+                "id": fix_id, "date": f["fixture"]["date"], "match": f"{home} vs {away}", "home_team": home, "away_team": away,
+                "league": league_name, "league_logo": f["league"]["logo"], "country_flag": f["league"]["flag"], 
+                "home_logo": f["teams"]["home"]["logo"], "away_logo": f["teams"]["away"]["logo"], "round": f["league"]["round"],
+                "score": { "status": f["fixture"]["status"]["short"], "time": f["fixture"]["status"]["elapsed"], "goals_h": f["goals"]["home"], "goals_a": f["goals"]["away"] },
+                "has_model": has_model, "probs": model_probs, "predicted_xg": predicted_score, 
+                "most_likely_score": score_display,
+                "market_odds": market_odds,
+                "events": f.get("events", [])
             })
-        except Exception as e: print(f"❌ Error {f.get('fixture',{}).get('id')}: {e}")
+        except Exception as e: print(f"❌ Error: {e}")
 
     final_results.sort(key=lambda x: x['date'])
     api_cache["data"] = final_results
     api_cache["last_updated"] = current_time
-    return final_results
+    return { "matches": final_results, "history": history }
