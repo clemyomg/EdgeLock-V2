@@ -232,25 +232,26 @@ function WinnerTab({ data, theme, bankroll }: any) {
 function HandicapTab({ data, theme, bankroll }: any) {
     const handicaps = data.market_odds["Handicaps"] || [];
     
-    // Sort Home vs Away
-    const homeH = handicaps.filter((h:any) => h.label.includes("Home")).sort((a:any,b:any) => a.odd - b.odd);
-    const awayH = handicaps.filter((h:any) => h.label.includes("Away")).sort((a:any,b:any) => a.odd - b.odd);
+    // Fuzzy match helper
+    const findH = (labelStr: string) => handicaps.find((h:any) => h.label.replace(" ", "").includes(labelStr.replace(" ", "")));
 
     return (
         <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="flex flex-col gap-1">
                 <div className="text-center opacity-50 font-bold mb-1">Home</div>
-                {homeH.length > 0 ? homeH.slice(0,4).map((h:any, i:number) => {
-                    const probKey = h.label.replace(" ", ""); 
-                    return <BetRow key={i} label={h.label.replace("Home ", "")} prob={data.probs[probKey]} odd={h.odd} theme={theme} bankroll={bankroll} />
-                }) : <div className="opacity-30 text-center">-</div>}
+                {["Home +1.5", "Home +2.5"].map((lbl) => {
+                    const h = findH(lbl);
+                    const probKey = lbl.replace(" ", ""); // "Home+1.5"
+                    return <BetRow key={lbl} label={lbl.replace("Home ", "")} prob={data.probs[probKey]} odd={h?.odd} theme={theme} bankroll={bankroll} />
+                })}
             </div>
             <div className="flex flex-col gap-1">
                 <div className="text-center opacity-50 font-bold mb-1">Away</div>
-                {awayH.length > 0 ? awayH.slice(0,4).map((h:any, i:number) => {
-                    const probKey = h.label.replace(" ", ""); 
-                    return <BetRow key={i} label={h.label.replace("Away ", "")} prob={data.probs[probKey]} odd={h.odd} theme={theme} bankroll={bankroll} />
-                }) : <div className="opacity-30 text-center">-</div>}
+                {["Away +1.5", "Away +2.5"].map((lbl) => {
+                    const h = findH(lbl);
+                    const probKey = lbl.replace(" ", ""); // "Away+1.5"
+                    return <BetRow key={lbl} label={lbl.replace("Away ", "")} prob={data.probs[probKey]} odd={h?.odd} theme={theme} bankroll={bankroll} />
+                })}
             </div>
         </div>
     )

@@ -38,7 +38,7 @@ app.add_middleware(
 def normalize_name(name):
     return name.lower().replace("fc ", "").replace(" 04", "").replace("sv ", "").replace("borussia ", "").replace(" 05", "").replace("1. ", "").strip()
 
-# --- 1. TRAINING (Unchanged) ---
+# --- 1. TRAINING ---
 def train_league_model(league_name):
     folder_path = os.path.join("data", league_name)
     if not os.path.exists(folder_path): return None
@@ -96,11 +96,12 @@ def calculate_all_probabilities(league, home, away):
     xg_a = a['att_a'] * h['def_h'] * db_stats['avg_a']
     prob_h, prob_d, prob_a = 0, 0, 0
     
-    # Track Goals 1.5 - 4.5
+    # Goals 1.5 - 4.5
     goal_keys = [1.5, 2.5, 3.5, 4.5]
     probs_goals = {f"Over{x}": 0 for x in goal_keys}
     
-    handicap_lines = [-2.5, -1.5, 1.5, 2.5]
+    # Full Range of Handicaps
+    handicap_lines = [-2.5, -2.0, -1.5, -1.0, -0.5, 0.5, 1.0, 1.5, 2.0, 2.5]
     probs_handicap = {f"Home{'+' if h>0 else ''}{h}": 0 for h in handicap_lines}
 
     max_score_prob = 0
@@ -121,8 +122,7 @@ def calculate_all_probabilities(league, home, away):
                 if total > x: probs_goals[f"Over{x}"] += p
 
             for h in handicap_lines:
-                if (i + h) > j:
-                    probs_handicap[f"Home{'+' if h>0 else ''}{h}"] += p
+                if (i + h) > j: probs_handicap[f"Home{'+' if h>0 else ''}{h}"] += p
 
     result = { 
         "1": prob_h, "X": prob_d, "2": prob_a, "1X": prob_h + prob_d, "X2": prob_d + prob_a,
@@ -158,7 +158,6 @@ def get_live_edges(db: Session = Depends(get_db)):
     settle_finished_games(db)
     current_time = time.time()
     
-    # HISTORY
     history = []
     settled = db.query(MatchPrediction).filter(MatchPrediction.status == "FT").order_by(desc(MatchPrediction.id)).limit(20).all()
     for g in settled:
@@ -179,50 +178,31 @@ def get_live_edges(db: Session = Depends(get_db)):
     for league_name, league_id in LEAGUE_CONFIG.items():
         if league_name not in league_stats: continue
         try:
-            print(f"📡 Fetching Fixtures for {league_name}...")
             res = requests.get(f"https://v3.football.api-sports.io/fixtures?league={league_id}&season={CURRENT_SEASON}&next=10", headers=headers)
             if res.status_code == 200:
                 games = res.json().get("response", [])
                 if games: combined_fixtures.extend(games)
-                print(f"✅ Found {len(games)} games.")
-            else:
-                print(f"❌ API Error: {res.status_code}")
-        except Exception as e: print(f"❌ Network Error: {e}")
+        except: pass
 
-    # 2. SMART ODDS BATCHING (Winner + Handicap + Goals) 🧠
+    # 2. ODDS BATCHING
     odds_cache = {}
     if combined_fixtures:
         for league_name, league_id in LEAGUE_CONFIG.items():
             if league_name not in league_stats: continue
-            
-            # Fetch ALL 3 markets to save calls
             for bet_id in [1, 5, 6]:
                 try:
-                    print(f"🔍 Fetching Market {bet_id} for {league_name}...")
                     res = requests.get(f"https://v3.football.api-sports.io/odds?league={league_id}&season={CURRENT_SEASON}&bet={bet_id}", headers=headers)
                     if res.status_code == 200:
-                        count = 0
                         for item in res.json().get("response", []):
                             fid = item["fixture"]["id"]
                             if fid not in odds_cache: odds_cache[fid] = []
-                            
-                            # Merge bookies
                             new_bookies = item["bookmakers"]
                             if not new_bookies: continue
-                            
-                            # Find preferred bookie (Bet365=1)
                             target = next((b for b in new_bookies if b["id"] == 1), new_bookies[0])
-                            
-                            # Check if we already have this bookie for this match
                             existing = next((b for b in odds_cache[fid] if b["id"] == target["id"]), None)
-                            
-                            if existing:
-                                existing["bets"].extend(target["bets"])
-                            else:
-                                odds_cache[fid].append(target)
-                            count += 1
-                        print(f"   ↳ Loaded odds for {count} matches.")
-                except Exception as e: print(f"❌ Odds Error: {e}")
+                            if existing: existing["bets"].extend(target["bets"])
+                            else: odds_cache[fid].append(target)
+                except: pass
 
     # DB FALLBACK
     if not combined_fixtures:
@@ -242,7 +222,7 @@ def get_live_edges(db: Session = Depends(get_db)):
                 "probs": {k: round(v * 100, 1) for k, v in probs.items() if k not in ["xg_h", "xg_a", "most_likely_score"]},
                 "predicted_xg": { "home": f"{probs['xg_h']:.2f}", "away": f"{probs['xg_a']:.2f}" },
                 "most_likely_score": probs["most_likely_score"],
-                "market_odds": g.raw_data.get("market_odds_cache", { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "Handicaps": [], "Goals": {} })
+                "market_odds": g.raw_data.get("market_odds_cache", {})
             }
             fallback_results.append(row)
         fallback_results.sort(key=lambda x: x['date'])
@@ -269,19 +249,14 @@ def get_live_edges(db: Session = Depends(get_db)):
             score_display = probs["most_likely_score"]
             predicted_score = { "home": f"{probs['xg_h']:.2f}", "away": f"{probs['xg_a']:.2f}" }
             
-            # --- ODDS PARSING ---
+            # --- ODDS PARSING (NUCLEAR OPTION) ---
             market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "Handicaps": [], "Goals": {} }
-            # Initialize Goal Keys
             for g_line in [1.5, 2.5, 3.5, 4.5]:
                 market_odds["Goals"][f"{g_line}"] = { "Over": 0, "Under": 0 }
 
-            # Retrieve from our smart merged cache
             bookies = odds_cache.get(fix_id, [])
-            
-            # Fallback Deep Fetch if missing (Safety Net)
-            if not bookies:
+            if not bookies: 
                  try:
-                    #print(f"🔍 Deep Fetch for Match {fix_id}...")
                     res_odds = requests.get(f"https://v3.football.api-sports.io/odds?fixture={fix_id}", headers=headers).json()
                     bookies = res_odds.get("response", [])[0].get("bookmakers", [])
                  except: pass
@@ -298,24 +273,24 @@ def get_live_edges(db: Session = Depends(get_db)):
                         for v in bet["values"]:
                             if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
                             if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
-                    elif bet["id"] == 6: # Goals
+                    elif bet["id"] == 6: # Goals Over/Under (Standard)
                         for v in bet["values"]:
-                            val_str = str(v["value"]) # e.g. "Over 2.5"
+                            val_str = str(v["value"]) 
                             odd_val = float(v["odd"])
-                            
-                            # EXACT MATCHING to avoid shift
+                            # Matches "Over 2.5" exactly
                             for g_line in [1.5, 2.5, 3.5, 4.5]:
-                                if val_str == f"Over {g_line}": 
-                                    market_odds["Goals"][str(g_line)]["Over"] = odd_val
-                                elif val_str == f"Under {g_line}": 
-                                    market_odds["Goals"][str(g_line)]["Under"] = odd_val
-                                    
+                                if val_str == f"Over {g_line}": market_odds["Goals"][str(g_line)]["Over"] = odd_val
+                                if val_str == f"Under {g_line}": market_odds["Goals"][str(g_line)]["Under"] = odd_val
                     elif bet["id"] == 5 or "Asian" in bet["name"]: # Asian
                             for v in bet["values"]:
                                 try:
                                     label = str(v["value"]) 
                                     odd = float(v["odd"])
-                                    market_odds["Handicaps"].append({ "label": label, "odd": odd })
+                                    # NUCLEAR FILTER: BAN "OVER" FROM HANDICAPS
+                                    if "Over" not in label and "Under" not in label:
+                                        # Normalize "Home + 1.5" -> "Home +1.5"
+                                        label = label.replace(" + ", " +").replace(" - ", " -")
+                                        market_odds["Handicaps"].append({ "label": label, "odd": odd })
                                 except: pass
 
             f["market_odds_cache"] = market_odds 
