@@ -182,6 +182,7 @@ def get_live_edges(db: Session = Depends(get_db)):
     combined_fixtures = []
     
     # 1. FETCH FIXTURES
+    print("📡 Fetching Fixtures for Bundesliga...")
     for league_name, league_id in LEAGUE_CONFIG.items():
         if league_name not in league_stats: continue
         try:
@@ -190,30 +191,11 @@ def get_live_edges(db: Session = Depends(get_db)):
                 games = res.json().get("response", [])
                 if games: combined_fixtures.extend(games)
         except: pass
+    
+    print(f"✅ Found {len(combined_fixtures)} games for Bundesliga")
 
-    # 2. ODDS BATCHING (STRICT)
-    odds_cache = {}
-    if combined_fixtures:
-        for league_name, league_id in LEAGUE_CONFIG.items():
-            if league_name not in league_stats: continue
-            for bet_id in [1, 5, 6]:
-                try:
-                    res = requests.get(f"https://v3.football.api-sports.io/odds?league={league_id}&season={CURRENT_SEASON}&bet={bet_id}", headers=headers)
-                    if res.status_code == 200:
-                        for item in res.json().get("response", []):
-                            fid = item["fixture"]["id"]
-                            if fid not in odds_cache: odds_cache[fid] = []
-                            new_bookies = item["bookmakers"]
-                            if not new_bookies: continue
-                            
-                            # PRIORITIZE TRUSTED BOOKIES
-                            preferred = [1, 8, 3] # Bet365, William Hill, Betfair
-                            target = next((b for b in new_bookies if b["id"] in preferred), new_bookies[0])
-                            
-                            existing = next((b for b in odds_cache[fid] if b["id"] == target["id"]), None)
-                            if existing: existing["bets"].extend(target["bets"])
-                            else: odds_cache[fid].append(target)
-                except: pass
+    # 2. DEEP SCAN (No Bulk)
+    odds_cache = {} 
 
     # DB FALLBACK
     if not combined_fixtures:
@@ -242,11 +224,13 @@ def get_live_edges(db: Session = Depends(get_db)):
     seen_ids = set()
     final_results = []
     
+    print("📡 Fetching Deep Odds for Bundesliga...")
+
     for f in combined_fixtures:
         if f["fixture"]["id"] in seen_ids: continue
         seen_ids.add(f["fixture"]["id"])
         
-        has_model = False # Initialize safely to prevent NameError
+        has_model = False 
         
         try:
             fix_id = f["fixture"]["id"]
@@ -262,70 +246,83 @@ def get_live_edges(db: Session = Depends(get_db)):
             score_display = probs["most_likely_score"]
             predicted_score = { "home": f"{probs['xg_h']:.2f}", "away": f"{probs['xg_a']:.2f}" }
             
-            # --- STRICT PARSER ---
+            # --- MARKET PARSER ---
             market_odds = { "1": 0, "X": 0, "2": 0, "1X": 0, "X2": 0, "Handicaps": [], "Goals": {} }
             for g_line in [1.5, 2.5, 3.5, 4.5]:
                 market_odds["Goals"][f"{g_line}"] = { "Over": 0, "Under": 0 }
 
-            bookies = odds_cache.get(fix_id, [])
-            if not bookies: 
-                 try:
-                    res_odds = requests.get(f"https://v3.football.api-sports.io/odds?fixture={fix_id}", headers=headers).json()
-                    bookies = res_odds.get("response", [])[0].get("bookmakers", [])
-                 except: pass
+            # FORCE DEEP FETCH
+            print(f"🔍 Deep Fetch for Match {fix_id}...")
+            bookies = []
+            try:
+                res_odds = requests.get(f"https://v3.football.api-sports.io/odds?fixture={fix_id}", headers=headers).json()
+                bookies = res_odds.get("response", [])[0].get("bookmakers", [])
+            except: pass
 
             if bookies:
-                # Priority: Bet365 > WilliamHill > Others
-                preferred = [1, 8, 3]
-                target_bookie = next((b for b in bookies if b["id"] in preferred), bookies[0])
+                preferred = [1, 8, 3] 
+                bookies.sort(key=lambda b: preferred.index(b["id"]) if b["id"] in preferred else 999)
                 
-                # First pass: Bet 6 (Standard Goals) - Baseline
-                for bet in target_bookie["bets"]:
-                    if bet["id"] == 6: # GOALS (Standard)
-                        for v in bet["values"]:
-                            val_str = str(v["value"]) 
-                            odd_val = float(v["odd"])
-                            for g_line in [1.5, 2.5, 3.5, 4.5]:
-                                if val_str == f"Over {g_line}": market_odds["Goals"][str(g_line)]["Over"] = odd_val
-                                if val_str == f"Under {g_line}": market_odds["Goals"][str(g_line)]["Under"] = odd_val
-                                
-                # Second pass: Winner, DC, and Asian (Overwrite Goals + Flexible Handicap)
-                for bet in target_bookie["bets"]:
-                    if bet["id"] == 1: # Winner
-                        for v in bet["values"]:
-                            if v["value"] == "Home": market_odds["1"] = float(v["odd"])
-                            if v["value"] == "Away": market_odds["2"] = float(v["odd"])
-                            if v["value"] == "Draw": market_odds["X"] = float(v["odd"])
-                    elif bet["id"] == 12: # DC
-                        for v in bet["values"]:
-                            if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
-                            if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
-                    elif bet["id"] == 5: # ASIAN HANDICAP 
+                found_bets = set()
+
+                for bookie in bookies:
+                    for bet in bookie["bets"]:
+                        
+                        # Bet 6: Standard Goals
+                        if bet["id"] == 6:
+                            for v in bet["values"]:
+                                val_str = str(v["value"]) 
+                                odd_val = float(v["odd"])
+                                for g_line in [1.5, 2.5, 3.5, 4.5]:
+                                    if val_str == f"Over {g_line}" and market_odds["Goals"][str(g_line)]["Over"] == 0:
+                                        market_odds["Goals"][str(g_line)]["Over"] = odd_val
+                                    if val_str == f"Under {g_line}" and market_odds["Goals"][str(g_line)]["Under"] == 0:
+                                        market_odds["Goals"][str(g_line)]["Under"] = odd_val
+
+                        # Bet 1: Winner
+                        elif bet["id"] == 1 and "winner" not in found_bets:
+                            for v in bet["values"]:
+                                if v["value"] == "Home": market_odds["1"] = float(v["odd"])
+                                if v["value"] == "Away": market_odds["2"] = float(v["odd"])
+                                if v["value"] == "Draw": market_odds["X"] = float(v["odd"])
+                            if market_odds["1"] > 0: found_bets.add("winner")
+
+                        # Bet 12: DC
+                        elif bet["id"] == 12 and "dc" not in found_bets:
+                            for v in bet["values"]:
+                                if v["value"] == "Home/Draw": market_odds["1X"] = float(v["odd"])
+                                if v["value"] == "Draw/Away": market_odds["X2"] = float(v["odd"])
+                            if market_odds["1X"] > 0: found_bets.add("dc")
+
+                        # Bet 5 (Asian) OR Bet 4 (Alt Asian)
+                        elif bet["id"] in [5, 4]:
                             for v in bet["values"]:
                                 try:
                                     label = str(v["value"]) 
                                     odd = float(v["odd"])
                                     
-                                    # Print debug info to see what we are getting!
-                                    print(f"🔍 Asian Line Found: {label} ({odd})")
-
-                                    # 1. Asian Goal Line Overwrite (Verified Working)
+                                    # 1. Asian Goal Line
                                     if "Over" in label or "Under" in label:
                                         parts = label.split(" ")
                                         if len(parts) >= 2:
                                             line_val = parts[1]
-                                            type_val = parts[0] # Over or Under
+                                            type_val = parts[0]
                                             if line_val in market_odds["Goals"]:
                                                 market_odds["Goals"][line_val][type_val] = odd
-                                                print(f"✅ Swapped Goal Odd {line_val} {type_val} -> {odd} (Asian)")
-                                        continue
+                                                print(f"✅ Found Goal Odd: {type_val} {line_val} -> {odd}")
+                                        continue 
 
-                                    # 2. Relaxed Handicap Filter
-                                    # We look for ANY label containing "+1.5" or "+2.5"
-                                    # This catches "Home +1.5", "Away +2.5", "Home +1.50" etc.
-                                    if "+1.5" in label or "+2.5" in label:
-                                        market_odds["Handicaps"].append({ "label": label, "odd": odd })
-                                        print(f"✅ Added Target Handicap: {label}")
+                                    # 2. Team Handicap (+1.5, +2.5) with SAFETY FILTER
+                                    if "1.5" in label or "2.5" in label:
+                                        # SAFETY FILTER: Only accept odds < 2.5 (High probability / Safety bets)
+                                        if odd < 2.5:
+                                            # SMART FIX: If odd is Safe (< 2.5), assume Positive Handicap (+)
+                                            # This fixes the API's inverted sign issue (e.g. "Away -1.5" -> "Away +1.5")
+                                            clean_label = label.replace("-", "+")
+                                            
+                                            if not any(h["label"] == clean_label for h in market_odds["Handicaps"]):
+                                                market_odds["Handicaps"].append({ "label": clean_label, "odd": odd })
+                                                print(f"✅ Found Safe Handicap (Fixed): {clean_label} -> {odd}")
                                         
                                 except: pass
 
@@ -350,7 +347,7 @@ def get_live_edges(db: Session = Depends(get_db)):
                 "market_odds": market_odds,
                 "events": f.get("events", [])
             })
-        except Exception as e: print(f"❌ Error: {e}")
+        except Exception as e: print(f"❌ Error processing match: {e}")
 
     final_results.sort(key=lambda x: x['date'])
     api_cache["data"] = final_results
