@@ -289,7 +289,7 @@ def get_live_edges(db: Session = Depends(get_db)):
                                 if val_str == f"Over {g_line}": market_odds["Goals"][str(g_line)]["Over"] = odd_val
                                 if val_str == f"Under {g_line}": market_odds["Goals"][str(g_line)]["Under"] = odd_val
                                 
-                # Second pass: Winner, DC, and Asian (Overwrite Goals + Strict Handicap)
+                # Second pass: Winner, DC, and Asian (Overwrite Goals + Flexible Handicap)
                 for bet in target_bookie["bets"]:
                     if bet["id"] == 1: # Winner
                         for v in bet["values"]:
@@ -306,6 +306,9 @@ def get_live_edges(db: Session = Depends(get_db)):
                                     label = str(v["value"]) 
                                     odd = float(v["odd"])
                                     
+                                    # Print debug info to see what we are getting!
+                                    print(f"🔍 Asian Line Found: {label} ({odd})")
+
                                     # 1. Asian Goal Line Overwrite (Verified Working)
                                     if "Over" in label or "Under" in label:
                                         parts = label.split(" ")
@@ -317,11 +320,12 @@ def get_live_edges(db: Session = Depends(get_db)):
                                                 print(f"✅ Swapped Goal Odd {line_val} {type_val} -> {odd} (Asian)")
                                         continue
 
-                                    # 2. Strict Handicap Filter (NEW)
-                                    # Only allowing: Home/Away +1.5, +2.5
-                                    allowed_handicaps = ["Home +1.5", "Away +1.5", "Home +2.5", "Away +2.5"]
-                                    if label in allowed_handicaps:
+                                    # 2. Relaxed Handicap Filter
+                                    # We look for ANY label containing "+1.5" or "+2.5"
+                                    # This catches "Home +1.5", "Away +2.5", "Home +1.50" etc.
+                                    if "+1.5" in label or "+2.5" in label:
                                         market_odds["Handicaps"].append({ "label": label, "odd": odd })
+                                        print(f"✅ Added Target Handicap: {label}")
                                         
                                 except: pass
 
